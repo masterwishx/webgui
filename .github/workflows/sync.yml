@@ -12,11 +12,8 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
-      # Sync the fork's branch with the upstream repository.
-      # Replace "main" with your default branch (e.g. "master").
-      # Fails if the fork has commits that upstream doesn't (needs merge/rebase).
-      - run: gh repo sync ${{ github.repository }} --branch master
+      # Merge upstream into this fork's branch, keeping fork-only commits
+      # (like this workflow file). Fails only on real merge conflicts.
+      - run: gh api repos/${{ github.repository }}/merge-upstream -f branch=master
         env:
-          # If upstream changes files in .github/workflows, replace this with
-          # a personal access token (scope: workflow) stored as a repo secret.
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

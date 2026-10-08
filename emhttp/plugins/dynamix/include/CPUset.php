@@ -17,7 +17,8 @@ require_once "$docroot/webGui/include/Helpers.php";
 // add translations
 $_SERVER['REQUEST_URI'] = 'settings';
 require_once "$docroot/webGui/include/Translations.php";
-
+$is_intel_cpu = is_intel_cpu();
+$core_types = $is_intel_cpu ? get_intel_core_types() : [];
 $cpus = explode(';',$_POST['cpus']??'');
 $corecount = 0;
 foreach ($cpus as $pair) {
@@ -32,7 +33,7 @@ function scan($area, $text) {
 
 function create($id, $name, $vcpu) {
   // create the list of checkboxes. Make multiple rows when CPU cores are many ;)
-  global $cpus;
+  global $cpus,$is_intel_cpu,$core_types;
   $total = count($cpus);
   $loop = floor(($total-1)/32)+1;
   $text = [];
@@ -48,8 +49,12 @@ function create($id, $name, $vcpu) {
       $check1 = ($vcpu && in_array($cpu1, $vcpu)) ? 'checked':'';
       $check2 = $cpu2 ? ($vcpu && (in_array($cpu2, $vcpu)) ? 'checked':''):'';
       if (empty($text[$n])) $text[$n] = '';
-      $text[$n] .="<label class='checkbox'><input type='checkbox' $checkclass name='$name:$cpu1' $check1><span class='checkmark'></span></label><br>";
-      if ($cpu2) $text[$n] .= "<label class='checkbox'><input type='checkbox' $checkclass name='$name:$cpu2' $check2><span class='checkmark'></span></label><br>";
+      if ($is_intel_cpu && count($core_types) > 0) $core_type = "{$core_types[$cpu1]}"; else $core_type = "";
+      $text[$n] .="<label title='$core_type' class='checkbox'><input  type='checkbox' $checkclass name='$name:$cpu1' $check1><span class='checkmark'></span></label><br>";
+      if ($cpu2) {
+        if ($is_intel_cpu && count($core_types) > 0) $core_type = "{$core_types[$cpu2]}"; else $core_type = "";
+        $text[$n] .= "<label title='$core_type' class='checkbox'><input type='checkbox' $checkclass name='$name:$cpu2' $check2><span class='checkmark'></span></label><br>";
+      }
     }
   }
   echo implode(array_map(function($t){return "<td>$t</td>";},$text));
@@ -138,6 +143,9 @@ case 'is':
     $isol = "";
     $isolcpus = [];
     $bootcfg = file('/boot/grub/grub.cfg', FILE_IGNORE_NEW_LINES);
+    $bootentry = 0;
+    $in_menuentry = false;
+    $current_entry = '';
     // find the default section
     $menu_entries = [];
     foreach ($bootcfg as $line) {
@@ -160,13 +168,15 @@ case 'is':
       }
     }
     // search in selected menuentry
-    $menuentry = explode("\n", $menu_entries[$bootentry]);
-    // find the current isolcpus setting
-    if (scan($menu_entries[$bootentry],'linux ')) {
-      foreach ($menuentry as $cmd) {
-        if (scan($cmd,'isolcpus')) {
-          $isol = explode('=',$cmd)[1];
-          break;
+    if (isset($menu_entries[$bootentry])) {
+      $menuentry = explode("\n", $menu_entries[$bootentry]);
+      // find the current isolcpus setting
+      if (scan($menu_entries[$bootentry],'linux ') || scan($menu_entries[$bootentry],'linuxefi ')) {
+        foreach ($menuentry as $cmd) {
+          if (preg_match('/\bisolcpus=([^ \t]+)/', $cmd, $match)) {
+            $isol = $match[1];
+            break;
+          }
         }
       }
     }
@@ -174,8 +184,16 @@ case 'is':
   if ($isol != '') {
     // convert to individual numbers
     foreach (explode(',',$isol) as $cpu) {
-      [$first,$last] = my_explode('-',$cpu);
-      $last = $last ?: $first;
+      $cpu = trim($cpu);
+      if ($cpu === '') continue;
+
+      // Handle only numeric tokens/ranges (e.g. 2, 4-7); skip named flags.
+      if (!preg_match('/^(\d+)(?:-(\d+))?$/', $cpu, $range)) continue;
+
+      $first = (int)$range[1];
+      $last = isset($range[2]) ? (int)$range[2] : $first;
+      if ($last < $first) [$first,$last] = [$last,$first];
+
       for ($x = $first; $x <= $last; $x++) $isolcpus[] = $x;
     }
     sort($isolcpus,SORT_NUMERIC);

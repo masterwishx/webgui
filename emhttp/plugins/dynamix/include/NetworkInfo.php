@@ -20,7 +20,13 @@ if (isset($_POST['listen'])) {
   die(exec("$docroot/webGui/scripts/show_interfaces")?:_('Any'));
 }
 
-function port($eth) {
+// Helper function to normalize bitrate values
+function normalizeBitrate($rate) {
+  $parts = explode(' ', $rate);
+  return intval($parts[0] ?? 0).' '.($parts[1] ?? 'Bit/s');
+}
+
+function isPort($eth) {
   $sys = "/sys/class/net";
   if (substr($eth,0,4) == 'wlan') return $eth;
   $x = preg_replace('/[^0-9]/', '', $eth) ?: '0';
@@ -31,7 +37,7 @@ exec("grep -Po 'nameserver \K\S+' /etc/resolv.conf 2>/dev/null",$ns);
 $eth    = $_POST['port'] ?? '';
 $vlan   = $_POST['vlan'] ?? '';
 $wlan0  = $eth == 'wlan0';
-$port   = port($eth).($vlan ? ".$vlan" : "");
+$port   = isPort($eth).($vlan ? ".$vlan" : "");
 $v6on   = trim(file_get_contents("/proc/sys/net/ipv6/conf/$port/disable_ipv6"))==='0';
 $none   = _('None');
 $error  = "<span class='red-text'>"._('Missing')."</span>";
@@ -56,6 +62,8 @@ if ($wlan0) {
     $signal  = explode(': ', $speed[2])[1];
     $rxrate  = explode(': ', $speed[3])[1];
     $txrate  = explode(': ', $speed[4])[1];
+    $rxrate  = normalizeBitrate($rxrate);
+    $txrate  = normalizeBitrate($txrate);
     $tmp     = '/var/tmp/attr';
     $band    = [];
     $attr    = is_readable($tmp) ? (array)parse_ini_file($tmp,true) : [];

@@ -27,6 +27,8 @@ $cli = empty($zip);
 $docroot ??= ($_SERVER['DOCUMENT_ROOT'] ?: '/usr/local/emhttp');
 require_once "$docroot/webGui/include/Helpers.php";
 require_once "$docroot/webGui/include/Wrappers.php";
+require_once "$docroot/webGui/include/publish.php";
+require_once "$docroot/webGui/include/DiagnosticsAnonymizer.php";
 
 if (is_file('/boot/syslinux/syslinux.cfg')) {
   $bootenv = '/boot/syslinux';
@@ -45,26 +47,41 @@ $pools = pools_filter($disks);
 require_once "$docroot/webGui/include/CustomMerge.php";
 
 function write(...$messages){
-  $com = curl_init();
-  curl_setopt_array($com,[
-    CURLOPT_URL => 'http://localhost/pub/diagnostics?buffer_length=1',
-    CURLOPT_UNIX_SOCKET_PATH => '/var/run/nginx.socket',
-    CURLOPT_POST => 1,
-    CURLOPT_RETURNTRANSFER => true
-  ]);
   foreach ($messages as $message) {
-    curl_setopt($com, CURLOPT_POSTFIELDS, $message);
-    curl_exec($com);
+    publish('diagnostics', $message,1,false);
   }
-  curl_close($com);
 }
 
+// Add error logging function
+function log_error($message, $command = '') {
+  global $diag;
+  $error_log = "/$diag/logs/diagnostics.error.log";
+  $timestamp = date('Y-m-d H:i:s');
+  $log_message = "[$timestamp] $message";
+  if ($command) {
+    $log_message .= " (Command: $command)";
+  }
+  file_put_contents($error_log, $log_message . "\r\n", FILE_APPEND);
+}
+
+function abort_anonymization($message, $file = '') {
+  log_error($message);
+  if ($file && file_exists($file) && !@unlink($file)) {
+    log_error("Unable to remove unmasked diagnostics file");
+  }
+  throw new RuntimeException("Diagnostics anonymization failed");
+}
+
+// Modify run function to include error logging
 function run($cmd, &$save=null, $timeout=30) {
   global $cli,$diag;
   // output command for display
   write($cmd);
   // execute command with timeout of 30s
-  exec("timeout -s9 $timeout $cmd", $save);
+  exec("LC_ALL=en_US.UTF-8 timeout -s9 $timeout $cmd 2>&1", $save, $return_code);
+  if ($return_code !== 0) {
+    log_error("Command failed with return code $return_code", $cmd);
+  }
   return implode("\n",$save);
 }
 
@@ -82,6 +99,7 @@ function shareDisks($share) {
 function anonymize($text, $select) {
   global $all,$var,$pools,$customShares;
   if ($all) return $text;
+  anonymize_domain($text);
   switch ($select) {
   case 1:
     // remove any stray references to the GUID that may wind up in .ini files (notably Unassigned Devices)
@@ -89,7 +107,7 @@ function anonymize($text, $select) {
     $text = str_replace(end($guid),"...",$text);
     $rows = explode("\n", $text);
     $pool = implode('|',$pools) ?: 'cache';
-    $regex = "/\b((disk|$pool|parity|cpu|eth|dev)[0-9]+)|(smart|flash|flashbackup|$pool|parity|cpu{$customShares})\b/";
+    $regex = "/\b((disk|$pool|parity|cpu|eth|dev)[0-9]+)|(smart|flash|flashbackup|bootbackup|$pool|parity|cpu{$customShares})\b/";
     foreach ($rows as &$row) {
       if (!preg_match($regex, $row)) {
         $row = preg_replace("/^(\s*\[\S).*(\S\])( => Array)$/","$1..$2$3",$row);
@@ -117,23 +135,14 @@ function anonymize($text, $select) {
 function maskIP($file) {
   global $all;
 
-  if ($all) return;
-
-  // anonymize public IPv4 addresses
-  $rfc1918 = "(127|10|172\.1[6-9]|172\.2[0-9]|172\.3[0-1]|192\.168)((\.[0-9]{1,3}){2,3}([/\" .]|$))";
-  run("sed -ri 's/([\"\[ ]){$rfc1918}/\\1@@@\\2\\3/g; s/([\"\[ ][0-9]{1,3}\.)([0-9]{1,3}\.){2}([0-9]{1,3})([/\" .]|$)/\\1XXX.XXX.\\3\\4/g; s/@@@//g' ".escapeshellarg($file)." 2>/dev/null");
-
-  // anonymize full IPv6 addresses
-  $file_escaped = escapeshellarg($file);
-
-  // Anonymize IPv6 addresses without brackets
-  run("sed -ri 's/(([0-9a-f]{1,4}:){4})(([0-9a-f]{1,4}:){3}|:)([0-9a-f]{1,4})([ .:/]|$)/\\1XXXX:XXXX:XXXX:\\5\\6/g' $file_escaped 2>/dev/null");
-
-  // Anonymize IPv6 addresses with brackets
-  run("sed -ri 's/(\[([0-9a-f]{1,4}:){4})(([0-9a-f]{1,4}:){3}|:)([0-9a-f]{1,4})(\])([ .:/]|$)/\\1XXXX:XXXX:XXXX:\\5\\6/g' $file_escaped 2>/dev/null");
-
-  // Handle any remaining edge cases, e.g., addresses with subnet masks
-  run("sed -ri 's/(([0-9a-f]{1,4}:){4})(([0-9a-f]{1,4}:){3}|:)([0-9a-f]{1,4})(\/[0-9]{1,3})([ .:/]|$)/\\1XXXX:XXXX:XXXX:\\5\\7/g' $file_escaped 2>/dev/null");
+  if ($all || !file_exists($file)) return;
+  $text = @file_get_contents($file);
+  if ($text === false) abort_anonymization("Unable to read diagnostics file for IP anonymization", $file);
+  $masked = diagnostics_anonymize_ip_text($text);
+  if ($masked === null) abort_anonymization("Unable to anonymize IP addresses in diagnostics file", $file);
+  if (@file_put_contents($file, $masked) !== strlen($masked)) {
+    abort_anonymization("Unable to write anonymized diagnostics file", $file);
+  }
 }
 
 function download_url($url, $path="", $bg=false, $timeout=15) {
@@ -307,7 +316,7 @@ function geturls() {
     }
     $urls .= "\nOnce DNS has been restored, navigate to Settings -> Management Access and set 'Use SSL' back to '$use_ssl'\n";
   }
-  // get a list of the certificate files on the flash drive
+  // get a list of the certificate files on the boot drive
   $dirlisting[0] = "{$cert_path}";
   if (file_exists($cert_path)) {
     exec("ls -l ".escapeshellarg($cert_path), $dirlisting);
@@ -315,6 +324,8 @@ function geturls() {
     $dirlisting[1] = "Directory not found";
   }
   $urls .= "\n\n".implode("\n", $dirlisting)."\n";
+  anonymize_domain($urls);
+  
   return str_replace("\n", "\r\n", $urls);
 }
 
@@ -333,19 +344,144 @@ function anonymize_syslog($file) {
     foreach ($titles as $mover) {
       if (!$mover) continue;
       $title = "/{$mover[0]}..".substr($mover,-1)."/...";
-      run("sed -i 's/".str_replace("/","\/",$mover)."/".str_replace("/","\/",$title)."/g' ".escapeshellarg("$log.txt")." 2>/dev/null");
-      //run("sed -ri 's|(file: [.>cr].*)[ /]$mover/.*$|\\1 file: $title|' ".escapeshellarg("$log.txt")." 2>/dev/null");
+      run("sed -i 's/".str_replace("/","\/",$mover)."/".str_replace("/","\/",$title)."/g' ".escapeshellarg("$log.txt"));
+      //run("sed -ri 's|(file: [.>cr].*)[ /]$mover/.*$|\\1 file: $title|' ".escapeshellarg("$log.txt"));
     }
     run("grep -n ' cache_dirs: -' ".escapeshellarg("$log.txt")." 2>/dev/null|cut -d: -f1", $rows);
-    for ($i = 0; $i < count($rows); $i += 2) for ($row = $rows[$i]+1; $row < $rows[$i+1]; $row++) run("sed -ri '$row s|(cache_dirs: \S).*(\S)|\\1..\\2|' ".escapeshellarg("$log.txt")." 2>/dev/null");
+    for ($i = 0; $i < count($rows); $i += 2) for ($row = $rows[$i]+1; $row < $rows[$i+1]; $row++) run("sed -ri '$row s|(cache_dirs: \S).*(\S)|\\1..\\2|' ".escapeshellarg("$log.txt"));
   }
   // replace consecutive repeated lines in syslog
-  run("awk -i inplace '{if(s!=substr(\$0,17)){if(x>0)print\"### [PREVIOUS LINE REPEATED \"x\" TIMES] ###\\r\";print;x=0}else{x++}s=substr(\$0,17)}END{if(x>0)print\"### [PREVIOUS LINE REPEATED \"x\" TIMES] ###\\r\"}' ".escapeshellarg("$log.txt"));
+  run("awk -b -i inplace '{if(s!=substr($0,17)){if(x>0)print\"### [PREVIOUS LINE REPEATED \"x\" TIMES] ###\r\";print;x=0}else{x++}s=substr($0,17)}END{if(x>0)print\"### [PREVIOUS LINE REPEATED \"x\" TIMES] ###\r\"}' ".escapeshellarg("$log.txt"));
   // remove SHA256 hashes
-  run("sed -ri 's/(SHA256:).+[^\s\b]/SHA256:***REMOVED***/gm' $log.txt");
+  run("sed -ri 's/(SHA256:).+[^\s\b]/SHA256:***REMOVED***/gm' ".escapeshellarg("$log.txt"));
   // truncate syslog if too big
   if (basename($file)=='syslog' && filesize($file)>=$max) run("tail -n 200 ".escapeshellarg("$log.txt")." >".escapeshellarg("$log.last200.txt"));
   run("truncate -s '<$max' ".escapeshellarg("$log.txt"));
+  anonymize_domain_file("$log.txt");
+  if (file_exists("$log.last200.txt")) anonymize_domain_file("$log.last200.txt");
+}
+
+// anonymize email addresses
+function anonymize_email($file) {
+  global $diag, $all;
+
+  $log = "/$diag/logs/".pathinfo($file, PATHINFO_FILENAME).".txt";
+  run("todos <".escapeshellarg($file)." >".escapeshellarg($log));
+  if (!$all) {
+    run("sed -ri 's/\b[^[:space:]\/<>\"'\'']+@[^[:space:]\/<>\"'\'']+\.[^[:space:]\/<>\"'\'']+/email@removed.com/g' ".escapeshellarg($log));
+    anonymize_domain_file($log);
+    maskIP($log);
+  }
+}
+
+function anonymize_domain_file($file) {
+  global $all;
+
+  if (!$all && file_exists($file)) {
+    $text = @file_get_contents($file);
+    if ($text === false) abort_anonymization("Unable to read diagnostics file for domain anonymization", $file);
+    anonymize_domain($text);
+    if (@file_put_contents($file, $text) !== strlen($text)) {
+      abort_anonymization("Unable to write domain-anonymized diagnostics file", $file);
+    }
+  }
+}
+
+function anonymize_domain(&$text) {
+  global $all;
+  static $domain = "";
+
+  if (!$all) {
+    if ($domain == "") {
+      $ident = @parse_ini_file('/boot/config/ident.cfg');
+      $domain = strtolower(is_array($ident) ? ($ident['LOCAL_TLD'] ?? ($ident['LOCAL_TLD'] ?? "local")) : "local");
+    }
+    if (strpos($domain,".") !== false) {
+      $text = str_ireplace($domain,"removed_TLD",$text);
+    }
+    $masked = diagnostics_anonymize_tailscale_text($text);
+    if ($masked === null) abort_anonymization("Unable to anonymize Tailscale domains");
+    $text = $masked;
+  }
+}
+
+// anonymize VM names consistently across qemu filenames and XML content
+$vmAnonMap = [];
+$vmAnonUsed = [];
+function anonymize_vm_name($name) {
+  global $all, $vmAnonMap, $vmAnonUsed;
+
+  if ($all) return $name;
+  if (isset($vmAnonMap[$name])) return $vmAnonMap[$name];
+
+  $anon = diagnostics_anonymize_vm_name($name);
+
+  $base = $anon;
+  $i = 1;
+  while (in_array($anon, $vmAnonUsed, true)) {
+    $anon = $base . " ($i)";
+    $i++;
+  }
+
+  $vmAnonMap[$name] = $anon;
+  $vmAnonUsed[] = $anon;
+  return $anon;
+}
+
+function anonymize_vm_names_in_file($file) {
+  global $all, $vmAnonMap;
+
+  if ($all || !$vmAnonMap || !file_exists($file)) return;
+  $text = @file_get_contents($file);
+  if ($text === false) abort_anonymization("Unable to read diagnostics file for VM name anonymization", $file);
+  $masked = diagnostics_anonymize_named_text($text, $vmAnonMap);
+  if ($masked === null) abort_anonymization("Unable to anonymize VM names in diagnostics file", $file);
+  if (@file_put_contents($file, $masked) !== strlen($masked)) {
+    abort_anonymization("Unable to write VM-anonymized diagnostics file", $file);
+  }
+}
+
+// anonymize share names consistently (used for share files and df output)
+$shareAnonMap = [];
+$shareAnonUsed = [];
+function anonymize_share_name($share) {
+  global $all, $showshares, $shareAnonMap, $shareAnonUsed;
+
+  if ($all || in_array($share, $showshares, true)) return $share;
+  if (isset($shareAnonMap[$share])) return $shareAnonMap[$share];
+
+  $len = strlen($share);
+  if ($len > 2) {
+    $name = substr($share, 0, 1) . str_repeat('-', $len - 2) . substr($share, -1);
+  } else {
+    $name = $share;
+  }
+
+  $base = $name;
+  $i = 1;
+  while (in_array($name, $shareAnonUsed, true)) {
+    $name = $base . " ($i)";
+    $i++;
+  }
+
+  $shareAnonMap[$share] = $name;
+  $shareAnonUsed[] = $name;
+  return $name;
+}
+
+function anonymize_share_names_in_file($file, $shareMap, $pools) {
+  global $all;
+
+  if ($all || !$shareMap || !file_exists($file)) return;
+
+  $text = @file_get_contents($file);
+  if ($text === false) abort_anonymization("Unable to read diagnostics file for share anonymization", $file);
+
+  $masked = diagnostics_anonymize_storage_text($text, $shareMap, $pools);
+  if ($masked === null) abort_anonymization("Unable to anonymize share names in diagnostics file", $file);
+  if (@file_put_contents($file, $masked) !== strlen($masked)) {
+    abort_anonymization("Unable to write share-anonymized diagnostics file", $file);
+  }
 }
 
 // diagnostics start
@@ -356,7 +492,9 @@ if ($cli) {
   echo "Starting diagnostics collection... ";
   $server = isset($var['NAME']) ? str_replace(' ','_',strtolower($var['NAME'])) : 'tower';
   $date = date('Ymd-Hi');
-  $diag = "$server-diagnostics-$date";
+
+  $safeMode = (_var($var,'safeMode') == 'yes') ? "-safemode" : "";
+  $diag = "$server$safeMode-diagnostics-$date";
   $zip = "/boot/logs/$diag.zip";
 } else {
   // script is called from GUI
@@ -400,7 +538,7 @@ file_put_contents("/$diag/unraid-".$unraid['version'].".txt",$unraid['version'].
 // add bz*.sha256 values
 run("tail /boot/bz*.sha256 >> ".escapeshellarg("/$diag/unraid-".$unraid['version'].".txt"));
 
-// Get the previous version of Unraid from the previous directory on flash
+// Get the previous version of Unraid from the previous directory on the boot drive
 $changes = '/boot/previous/changes.txt';
 
 if (file_exists($changes)) {
@@ -424,6 +562,7 @@ foreach (glob("$path/*.ini") as $file) {
   // skip users file in anonymized mode
   if ($all || $ini != "users") file_put_contents("/$diag/system/vars.txt",preg_replace(["/\n/","/^Array/"],["\r\n",$ini],anonymize(print_r(parse_ini_file($file,true),true),1)),FILE_APPEND);
 }
+maskIP("/$diag/system/vars.txt");
 
 // Create loads.txt
 $cpuload = run("uptime")."  Cores: ".run("nproc")."\r\n".(string)@file_get_contents("$path/cpuload.ini")."\r\n";
@@ -447,10 +586,13 @@ file_put_contents("/$diag/system/loads.txt",$cpuload.implode("\r\n",$loadTxt));
 run("lscpu 2>/dev/null|todos >".escapeshellarg("/$diag/system/lscpu.txt"));
 run("lsscsi -vgl 2>/dev/null|todos >".escapeshellarg("/$diag/system/lsscsi.txt"));
 run("lspci -knn 2>/dev/null|todos >".escapeshellarg("/$diag/system/lspci.txt"));
-run("lspci -vv 2>/dev/null| awk '/ASPM/{print $0}' RS=|grep -P '(^[a-z0-9:.]+|ASPM |Disabled;|Enabled;)'|todos >".escapeshellarg("/$diag/system/aspm-status.txt"));
-run("lsusb 2>/dev/null|todos >".escapeshellarg("/$diag/system/lsusb.txt"));
+run("lspci -vv 2>/dev/null| awk -b '/ASPM/{print $0}' RS=|grep -P '(^[a-z0-9:.]+|ASPM |Disabled;|Enabled;)'|todos >".escapeshellarg("/$diag/system/aspm-status.txt"));
+run("lsusb -vt 2>/dev/null|todos >".escapeshellarg("/$diag/system/lsusb.txt"));
 run("free -mth 2>/dev/null|todos >".escapeshellarg("/$diag/system/memory.txt"));
-run("lsof -Pni 2>/dev/null|todos >".escapeshellarg("/$diag/system/lsof.txt"));
+$lsof = $all
+  ? "lsof -Pni 2>/dev/null"
+  : "lsof -Pni 2>/dev/null|awk 'NR==1 || /\\(LISTEN\\)/ || (/ UDP / && \$0 !~ /->/)'";
+run($lsof."|todos >".escapeshellarg("/$diag/system/lsof.txt"));
 run("lsmod|sort 2>/dev/null|todos >".escapeshellarg("/$diag/system/lsmod.txt"));
 run("df -h 2>/dev/null|todos >".escapeshellarg("/$diag/system/df.txt"));
 run("ip -br a|awk '/^(eth|bond)[0-9]+ /{print \$1}'|sort",$ports);
@@ -470,7 +612,7 @@ foreach ($ports as $port) {
   file_put_contents("/$diag/system/ethtool.txt", "--------------------------------\r\n", FILE_APPEND);
 }
 run("ip -br a|todos >".escapeshellarg("/$diag/system/ifconfig.txt"));
-if (!$all) maskIP("/$diag/system/ifconfig.txt");
+maskIP("/$diag/system/ifconfig.txt");
 
 // create system information (suppress errors)
 run("find /sys/kernel/iommu_groups/ -type l 2>/dev/null|sort -V|todos >".escapeshellarg("/$diag/system/iommu_groups.txt"));
@@ -482,28 +624,56 @@ foreach ($folders as $folder) {
   if (is_dir($folder)) run("echo -ne ".escapeshellarg("\r\n$folder\r\n")." >>".escapeshellarg($dest).";ls -l ".escapeshellarg($folder)."|todos >>".escapeshellarg("$dest")); else run("echo -ne ".escapeshellarg("\r\n$folder\r\nfolder does not exist\r\n")." >>".escapeshellarg("$dest"));
 }
 
-// copy configuration files (suppress errors)
-run("cp /boot/config/*.{cfg,conf,dat} ".escapeshellarg("/$diag/config")." 2>/dev/null");
-run("cp /boot/config/go ".escapeshellarg("/$diag/config/go.txt")." 2>/dev/null");
-
-// anonymize go file
-if (!$all) {
-  run("sed -i -e '/password/c ***line removed***' -e '/user/c ***line removed***' -e '/pass/c ***line removed***' ".escapeshellarg("/$diag/config/go.txt"));
+// copy configuration files
+if (glob("/boot/config/*.cfg")) {
+  run("cp -- /boot/config/*.cfg ".escapeshellarg("/$diag/config"));
 }
+if (glob("/boot/config/*.conf")) {
+  run("cp -- /boot/config/*.conf ".escapeshellarg("/$diag/config"));
+}
+if (glob("/boot/config/*.dat")) {
+  run("cp -- /boot/config/*.dat ".escapeshellarg("/$diag/config"));
+}
+// Current Saved PCI data.
+
+if (glob("/boot/config/savedpcidata.json")) {
+  run("cp -- /boot/config/savedpcidata.json ".escapeshellarg("/$diag/config"));
+}
+
+// Generate PCI Changes
+$pci_diffs = comparePCIData();
+file_put_contents("/$diag/config/pci_diffs.json",json_encode($pci_diffs,JSON_PRETTY_PRINT));
+
+// anonymize ident.cfg
+anonymize_domain_file("/$diag/config/ident.cfg");
+
+// handle go files
+foreach (['/boot/config/go', '/boot/config/go.safemode'] as $go) {
+  if (file_exists($go)) {
+    $dest = "/$diag/config/" . basename($go) . ".txt";
+    run("cp " . escapeshellarg($go) . " " . escapeshellarg($dest));
+    
+    // anonymize go file
+    if (!$all) {
+      run("sed -i -e '/password/c ***line removed***' -e '/user/c ***line removed***' -e '/pass/c ***line removed***' " . escapeshellarg($dest));
+    }
+  }
+}
+
 // anonymize configuration files
 if (!$all) {
-  run("sed -ri 's/^((disk|flash)(Read|Write)List.*=\")[^\"]+/\\1.../' ".escapeshellarg("/$diag/config/*.cfg")." 2>/dev/null");
+  run("find ".escapeshellarg("/$diag/config")." -name '*.cfg' -exec sed -ri 's/^((disk|flash)(Read|Write)List.*=\")[^\"]+/\\1.../' {} \\;");
   // anonymize IP addresses
   maskIP("/$diag/config/network.cfg");
   // anonymize wireless credentials
   if (file_exists("/$diag/config/wireless.cfg")) {
-    run("sed -ri 's/^((USERNAME|PASSWORD)=\")[^\"]+/\\1.../' ".escapeshellarg("/$diag/config/wireless.cfg")." 2>/dev/null");
+    run("sed -ri 's/^((USERNAME|PASSWORD)=\")[^\"]+/\\1.../' ".escapeshellarg("/$diag/config/wireless.cfg"));
   }
 }
 // include listening interfaces
 run("$docroot/webGui/scripts/show_interfaces ip|tr ',' '\n' >".escapeshellarg("/$diag/config/listen.txt"));
 run("$docroot/webGui/scripts/error_interfaces|sed 's/<i.*i>//' >>".escapeshellarg("/$diag/config/listen.txt"));
-if (!$all) maskIP("/$diag/config/listen.txt");
+maskIP("/$diag/config/listen.txt");
 
 // copy share information (anonymize if applicable)
 $files = glob("/boot/config/shares/*.cfg");
@@ -511,9 +681,10 @@ $shareDisk = [];
 foreach ($files as $file) {
   $dest = "/$diag/shares/".basename($file);
   $share = basename($file,'.cfg');
-  if (!in_array($share,$showshares)) $dest = anonymize($dest,2);
+  $anonShare = anonymize_share_name($share);
+  $dest = "/$diag/shares/$anonShare.cfg";
   @copy($file, $dest);
-  if (!$all) run("sed -ri 's/^(share(Comment|ReadList|WriteList)=\")[^\"]+/\\1.../' ".escapeshellarg($dest)." 2>/dev/null");
+  if (!$all) run("sed -ri 's/^(share(Comment|ReadList|WriteList)=\")[^\"]+/\\1.../' ".escapeshellarg($dest));
   $home = shareDisks($share);
   $home = $home ? "# Share exists on $home\r\n" : "# Share does not exist\r\n";
   $shareDisk[] = str_pad(basename($dest,'.cfg'),34).str_pad(exec("grep -m1 'shareUseCache' ".escapeshellarg($file)),24).$home;
@@ -528,11 +699,15 @@ foreach ($shares as $share) {
   if ($name && !in_array("/boot/config/shares/$name.cfg",$files)) {
     $home = shareDisks($name);
     $home = $home ? "# Share exists on $home\r\n" : "# Share does not exist\r\n";
-    $file = anonymize("/$diag/shares/$name.cfg",2);
+    $anonShare = anonymize_share_name($name);
+    $file = "/$diag/shares/$anonShare.cfg";
     file_put_contents($file,"# This share has default settings.\r\n".$home);
     file_put_contents("/$diag/shares/shareDisks.txt",str_pad(basename($file,'.cfg'),34).str_pad('shareUseCache="no"',24).$home,FILE_APPEND);
   }
 }
+
+// anonymize share names in df output
+if (!$all) anonymize_share_names_in_file("/$diag/system/df.txt", $shareAnonMap, $pools);
 
 // copy pools information (anonymize)
 $files = glob("/boot/config/pools/*.cfg");
@@ -657,25 +832,39 @@ if (file_exists($libvirtd)) {
 $qemu = glob("/var/log/libvirt/qemu/*.log*");
 if ($qemu) {
   foreach ($qemu as $file) {
-    $log = "/$diag/qemu/".basename($file,'.log');
+    $fileName = basename($file);
+    $vmName = preg_replace('/\\.log(?:\\..*)?$/', '', $fileName);
+    $logSuffix = substr($fileName, strlen($vmName));
+    $logName = anonymize_vm_name($vmName);
+    $log = "/$diag/qemu/" . $logName . ($logSuffix === '.log' ? '' : $logSuffix);
     run("todos <".escapeshellarg($file)." >".escapeshellarg("$log.txt"));
     if (filesize($file)>=$max) {
       run("tail -n 200 ".escapeshellarg("$log.txt")." >".escapeshellarg("$log.last200.txt"));
       run("truncate -s '<$max' ".escapeshellarg("$log.txt"));
+      anonymize_vm_names_in_file("$log.last200.txt");
     }
+    anonymize_vm_names_in_file("$log.txt");
   }
 } else {
   file_put_contents("/$diag/qemu/no qemu log files","");
 }
 
 // copy VM XML config files
-run("cp /etc/libvirt/qemu/*.xml ".escapeshellarg("/$diag/xml")." 2>/dev/null");
+$xml_files = glob("/etc/libvirt/qemu/*.xml");
+if ($xml_files) {
+  foreach ($xml_files as $file) {
+    $vmName = basename($file, '.xml');
+    $dest = "/$diag/xml/" . anonymize_vm_name($vmName) . '.xml';
+    run("cp -- ".escapeshellarg($file)." ".escapeshellarg($dest));
+  }
+}
 
 // anonymize MAC OSK info
 $all_xml = glob("/$diag/xml/*.xml");
 foreach ($all_xml as $xml) {
-  run("sed -ri 's/(,osk=).+/\\1.../' ".escapeshellarg("$xml")." 2>/dev/null");
-  run("sed -ri 's/(passwd=).+/\\1.../' ".escapeshellarg("$xml")." 2>/dev/null");
+  run("sed -ri 's/(,osk=).+/\\1.../' ".escapeshellarg("$xml"));
+  run("sed -ri 's/(passwd=).+/\\1.../' ".escapeshellarg("$xml"));
+  anonymize_vm_names_in_file($xml);
 }
 
 // copy syslog information (anonymize if applicable)
@@ -691,7 +880,7 @@ $dhcplog = "/var/log/dhcplog";
 if (file_exists($dhcplog)) {
   $log = "/$diag/logs/dhcplog.txt";
   run("todos <$dhcplog >".escapeshellarg($log));
-  if (!$all) maskIP($log);
+  maskIP($log);
 }
 
 // copy phplog
@@ -704,8 +893,21 @@ if (file_exists($phplog)) {
 // copy graphql-api.log
 $graphql = "/var/log/graphql-api.log";
 if (file_exists($graphql)) {
-  $log = "/$diag/logs/graphql-api.txt";
-  run("todos <$graphql >".escapeshellarg($log));
+  anonymize_email($graphql);
+}
+
+// copy sriov log
+$sriov = "/var/log/sriov";
+if (file_exists($sriov)) {
+  $log = "/$diag/logs/sriov.txt";
+  run("todos <$sriov >".escapeshellarg($log));
+}
+
+// copy sriov log
+$srioverrors = "/var/log/sriov-errors";
+if (file_exists($srioverrors)) {
+  $log = "/$diag/logs/sriov-errors.txt";
+  run("todos <$srioverrors >".escapeshellarg($log));
 }
 
 // copy vfio-pci log
@@ -741,9 +943,10 @@ newline("/$diag/system/sshd.txt");
 
 // copy servers.conf
 copy("/etc/nginx/conf.d/servers.conf", "/$diag/system/servers.conf.txt");
+anonymize_domain_file("/$diag/system/servers.conf.txt");
 maskIP("/$diag/system/servers.conf.txt");
-run("sed -Ei 's/[01234567890abcdef]+\.((my)?unraid\.net)/hash.\\1/gm;t' ".escapeshellarg("/$diag/system/servers.conf.txt")." 2>/dev/null");
-run("sed -Ei 's/\.[^\.]*\.ts\.net/\.magicdns\.ts\.net/gm' ".escapeshellarg("/$diag/system/servers.conf.txt")." 2>/dev/null");
+run("sed -Ei 's/[01234567890abcdef]+\.((my)?unraid\.net)/hash.\\1/gm;t' ".escapeshellarg("/$diag/system/servers.conf.txt"));
+run("sed -Ei 's/\.[^\.]*\.ts\.net/\.magicdns\.ts\.net/gm' ".escapeshellarg("/$diag/system/servers.conf.txt"));
 newline("/$diag/system/servers.conf.txt");
 
 // show installed patches

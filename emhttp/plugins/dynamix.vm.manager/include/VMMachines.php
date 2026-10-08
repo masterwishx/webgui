@@ -15,6 +15,12 @@
 $docroot ??= ($_SERVER['DOCUMENT_ROOT'] ?: '/usr/local/emhttp');
 require_once "$docroot/webGui/include/Helpers.php";
 require_once "$docroot/plugins/dynamix.vm.manager/include/libvirt_helpers.php";
+require_once "$docroot/webGui/include/SriovHelpers.php";
+
+function vm_manager_escape_html($value)
+{
+  return htmlspecialchars((string)$value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+}
 
 // add translations
 $_SERVER['REQUEST_URI'] = 'vms';
@@ -39,6 +45,8 @@ $i = 0;
 $kvm = ['var kvm=[];'];
 $show = explode(',',unscript(_var($_GET,'show')));
 $path = _var($domain_cfg,'MEDIADIR');
+$pci_device_changes = comparePCIData();
+$sriov = json_decode(getSriovInfoJson(true), true);
 
 foreach ($vms as $vm) {
   $res = $lv->get_domain_by_name($vm);
@@ -52,13 +60,28 @@ foreach ($vms as $vm) {
   $image = substr($icon,-4)=='.png' ? "<img src='$icon' class='img'>" : (substr($icon,0,5)=='icon-' ? "<i class='$icon img'></i>" : "<i class='fa fa-$icon img'></i>");
   $arrConfig = domain_to_config($uuid);
   $snapshots = getvmsnapshots($vm) ;
+  $vmpciids = $lv->domain_get_vm_pciids($vm);
+  $pcierror = false;
+  $srioverror = false;
+  foreach($vmpciids as $pciid => $pcidetail) {
+    if (isset($pci_device_changes["0000:".$pciid])) $pcierror = true;
+    // Check if device is an SR-IOV PF with VFs defined
+    $check_id = $pciid;
+    if (!preg_match('/^[0-9a-fA-F]{4}:/', $check_id)) {
+        $check_id = "0000:" . $check_id;
+    }
+    if (isset($sriov[$check_id]) && !empty($sriov[$check_id]['vfs'])) {
+        $srioverror = true;
+    }
+  }
   $cdroms = $lv->get_cdrom_stats($res,true,true) ;
   if ($state == 'running') {
     $mem = $dom['memory']/1024;
   } else {
     $mem = $lv->domain_get_memory($res)/1024;
   }
-  $mem = round($mem).'M';
+  $memRounded = round($mem);
+  $mem = ($memRounded >= 1024) ? ($memRounded / 1024) . 'G' : $memRounded . 'M';
   $vcpu = $dom['nrVirtCpu'];
   $template = $lv->_get_single_xpath_result($res, '//domain/metadata/*[local-name()=\'vmtemplate\']/@name');
   if (empty($template)) $template = 'Custom';
@@ -78,6 +101,8 @@ foreach ($vms as $vm) {
   $vmrcurl = '';
   $graphics = '';
   $virtual = false ;
+  $arrValidGPUDevices = !empty($arrConfig['gpu']) ? getValidGPUDevices() : [];
+  $vrtmodel = '';
   if (isset($arrConfig['gpu'][0]['model'])) {$vrtdriver=" "._("Driver").strtoupper(":{$arrConfig['gpu'][0]['model']} "); $vrtmodel =$arrConfig['gpu'][0]['model'];} else $vrtdriver = "";
   if (isset($arrConfig['gpu'][0]['render']) && $vrtmodel == "virtio3d") {
     if (isset($arrConfig['gpu'][0]['render']) && $arrConfig['gpu'][0]['render'] == "auto") $vrtdriver .= "<br>"._("RenderGPU").":"._("Auto"); else $vrtdriver .= "<br>"._("RenderGPU").":{$arrValidGPUDevices[$arrConfig['gpu'][0]['render']]['name']}";
@@ -88,7 +113,7 @@ foreach ($vms as $vm) {
     if ($vmrcprotocol == "vnc") $vmrcscale = "&resize=scale"; else $vmrcscale = "";
     $vmrcurl = autov('/plugins/dynamix.vm.manager/'.$vmrcprotocol.'.html',true).$vmrcscale.'&autoconnect=true&host='._var($_SERVER,'HTTP_HOST');
     if ($vmrcprotocol == "spice") $vmrcurl .= '&vmname='. urlencode($vm) .'&port=/wsproxy/'.$vmrcport.'/'; else $vmrcurl .= '&port=&path=/wsproxy/'.$wsport.'/';
-    $graphics = strtoupper($vmrcprotocol).':'._($auto)."$vrtdriver\n";
+    $graphics = strtoupper($vmrcprotocol).':'.$vmrcport."$vrtdriver\n";
     $virtual = true ;
   } elseif ($vmrcport == -1 || $autoport) {
     $vmrcprotocol = $lv->domain_get_vmrc_protocol($res);
@@ -97,7 +122,6 @@ foreach ($vms as $vm) {
     $virtual = true ;
   }
   if (!empty($arrConfig['gpu'])) {
-    $arrValidGPUDevices = getValidGPUDevices();
     foreach ($arrConfig['gpu'] as $arrGPU) {
       if ($arrGPU['id'] == "nogpu") {$graphics .= "No GPU"."\n";continue;}
       foreach ($arrValidGPUDevices as $arrDev) {
@@ -117,7 +141,7 @@ foreach ($vms as $vm) {
   unset($dom);
   if (!isset($domain_cfg["CONSOLE"])) $vmrcconsole = "web" ; else $vmrcconsole = $domain_cfg["CONSOLE"] ;
   if (!isset($domain_cfg["RDPOPT"])) $vmrcconsole .= ";no" ; else $vmrcconsole .= ";".$domain_cfg["RDPOPT"] ;
-  $menu = sprintf("onclick=\"addVMContext('%s','%s','%s','%s','%s','%s','%s','%s','%s','%s', '%s')\"", addslashes($vm),addslashes($uuid),addslashes($template),$state,addslashes($vmrcurl),strtoupper($vmrcprotocol),addslashes($log),addslashes($fstype), $vmrcconsole,false,addslashes(str_replace('"',"'",$WebUI)));
+  $menu = sprintf("onclick=\"addVMContext('%s','%s','%s','%s','%s','%s','%s','%s','%s','%s', '%s', %s)\"", addslashes($vm),addslashes($uuid),addslashes($template),$state,addslashes($vmrcurl),strtoupper($vmrcprotocol),addslashes($log),addslashes($fstype), $vmrcconsole,false,addslashes(str_replace('"',"'",$WebUI)),$pcierror,$srioverror);
   $kvm[] = "kvm.push({id:'$uuid',state:'$state'});";
   switch ($state) {
   case 'running':
@@ -170,12 +194,14 @@ foreach ($vms as $vm) {
         $iphdwadr = $arrIP["hwaddr"] == "" ? _("N/A") : $arrIP["hwaddr"];
         $iplist = $arrIP["addrs"];
         foreach ($iplist as $arraddr) {
-          $ipaddrval = $arraddr["addr"];
-          if (preg_match('/^f[c-f]/',$ipaddrval)) continue; // omit ipv6 private addresses
+          $ipaddr = (string)$arraddr["addr"];
+          if (preg_match('/^f[c-f]/',$ipaddr)) continue; // omit ipv6 private addresses
           $iptype = $arraddr["type"] ? "ipv6" : "ipv4";
-          $ipprefix = $arraddr["prefix"];
+          $ipprefix = vm_manager_escape_html((string)$arraddr["prefix"]);
           $ipnamemac = "$ipname ($iphdwadr)";
           if (!in_array($ipnamemac,$duplicates)) $duplicates[] = $ipnamemac; else $ipnamemac = "";
+          $ipnamemac = vm_manager_escape_html($ipnamemac);
+          $ipaddrval = vm_manager_escape_html($ipaddr);
           $ipliststr .= "<tr><td>$ipnamemac</td><td></td><td></td><td>$iptype</td><td>$ipaddrval</td><td>$ipprefix</td></tr>";
           $iptablestr .= "$ipaddrval/$ipprefix\n" ;
         }
@@ -196,7 +222,11 @@ foreach ($vms as $vm) {
   $title = _('Select ISO image');
   $cdstr = $cdromcount." / 2<a class='hand' title='$title' href='#' onclick='$changemedia'><i class='fa fa-dot-circle-o'></i></a>";
   echo "<tr parent-id='$i' class='sortable'><td class='vm-name' style='width:220px;padding:8px'><i class='fa fa-arrows-v mover orange-text'></i>";
-  echo "<span class='outer'><span id='vm-$uuid' $menu class='hand'>$image</span><span class='inner'><a href='#' onclick='return toggle_id(\"name-$i\")' title='click for more VM info'>$vm</a><br><i class='fa fa-$shape $status $color'></i><span class='state'>"._($status)." </span></span></span></td>";
+  echo "<span class='outer'><span id='vm-$uuid' $menu class='hand'>$image</span>";
+  echo "<span class='inner'><a href='#' onclick='return toggle_id(\"name-$i\")' title='click for more VM info'>$vm</a>";
+  if ($pcierror) echo "<i class=\"fa fa-warning fa-fw orange-text\" title=\""._('PCI Changed')."\n"._('Start disabled')."\"></i>";
+  if ($srioverror) echo "<i class=\"fa fa-warning fa-fw orange-text\" title=\""._('SR-IOV root device found')."\n"._('Start disabled')."\"></i>";
+  echo "<br><i class='fa fa-$shape $status $color'></i><span class='state'>"._($status)." </span></span></span></td>";
   echo "<td>$desc</td>";
   echo "<td><a class='vcpu-$uuid' style='cursor:pointer'>$vcpu</a></td>";
   echo "<td>$mem</td>";

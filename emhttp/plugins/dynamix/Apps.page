@@ -16,7 +16,10 @@ Code="e942"
 ?>
 <script>
 function installPlugin(file) {
-  openPlugin("plugin install "+file,"_(Install Plugin)_","","refresh");
+  // show which plugin in the progress heading; sanitize to a safe display slug
+  // (the heading is rendered as HTML), derived from the .plg basename
+  var name = (file.split('/').pop()||'').replace(/\.[a-z0-9]+$/i,'').replace(/[^\w.\- ]+/g,' ').trim();
+  openPlugin("plugin install "+file,"_(Install Plugin)_"+(name?': '+name:''),"","refresh");
 }
 </script>
 
@@ -26,5 +29,7 @@ function installPlugin(file) {
 <input type="hidden" name="file" value="https://ca.unraid.net/dl/https://raw.githubusercontent.com/unraid/community.applications/master/plugins/community.applications.plg">
 
 &nbsp;
-: <input type="button" value="_(Install)_" onclick="installPlugin(this.form.file.value)">
+: <span class="inline-block">
+    <input type="button" value="_(Install)_" onclick="installPlugin(this.form.file.value)">
+  </span>
 </form>

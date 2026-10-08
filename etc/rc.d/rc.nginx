@@ -6,7 +6,7 @@
 # Written for Slackware Linux by Cherife Li <cherife-#-dotimes.com>.
 
 # LimeTech - modified for Unraid OS
-# Bergware - modified for Unraid OS, October 2023
+# Bergware - modified for Unraid OS, May 2025
 
 # reference:
 # LANNAME                     'tower'
@@ -28,11 +28,12 @@ LOCATIONS="/etc/nginx/conf.d/locations.conf"
 INI="/var/local/emhttp/nginx.ini.new"
 CERTPATH="$SSL/certs/certificate_bundle.pem"
 TSCERTPATH="$SSL/certs/ts_bundle.pem"
-MYSERVERS="/boot/config/plugins/dynamix.my.servers/myservers.cfg"
+CONNECT_CONFIG="/boot/config/plugins/dynamix.my.servers/configs/connect.json"
+API_UTILS="/usr/local/share/dynamix.unraid.net/scripts/api_utils.sh"
 DEFAULTS="/etc/default/nginx"
 SYSTEM="/sys/class/net"
 SYSLOG="/var/log/syslog"
-
+IPV6MYUNRAIDNET=1
 # Load defaults
 # Defines NGINX_CUSTOMFA for custom Content-Security-Policy frame-ancestors url
 [[ -r $DEFAULTS ]] && . $DEFAULTS
@@ -73,6 +74,23 @@ fi
 
 fqdn(){
   echo ${CERTNAME/'*'/${1//[.:]/-}}
+}
+
+# check if remote access should be enabled
+check_remote_access(){
+  # Check if connect plugin is enabled using api_utils.sh
+  if [[ -f $API_UTILS ]] && $API_UTILS is_api_plugin_enabled "unraid-api-plugin-connect"; then
+    # Plugin is enabled, check connect.json configuration
+    if [[ -f $CONNECT_CONFIG ]] && command -v jq >/dev/null 2>&1; then
+      local wanaccess=$(jq -r '.wanaccess' "$CONNECT_CONFIG" 2>/dev/null)
+      local username=$(jq -r '.username' "$CONNECT_CONFIG" 2>/dev/null)
+      # Enable remote access if wanaccess is true and username is not empty
+      if [[ $wanaccess == "true" && -n $username && $username != "null" ]]; then
+        return 0
+      fi
+    fi
+  fi
+  return 1
 }
 
 # create listening ports
@@ -145,6 +163,37 @@ build_servers(){
 	#
 	server {
 	    listen unix:/var/run/nginx.socket default_server;
+      # filemanager should not display outdated messages
+	    location = /pub/filemanager {
+	        nchan_publisher;
+	        nchan_channel_id "filemanager";
+	        nchan_message_buffer_length $arg_buffer_length;
+	        nchan_message_timeout 30s;
+	    }
+	    # Capture task output at the publisher boundary. Existing plugin scripts
+	    # (including Community Apps and plugin_rm) POST directly to /pub/plugins
+	    # and never call WebGUI's publish(), so this hook is the only common path
+	    # for both legacy and first-party publishers.
+	    location ~ ^/pub/(plugins|docker|vmaction)$ {
+	        nchan_publisher;
+	        nchan_channel_id "$1";
+	        nchan_message_buffer_length $arg_buffer_length;
+	        nchan_message_timeout 0;
+	        nchan_publisher_upstream_request /task-capture;
+	    }
+	    location = /task-capture {
+	        internal;
+	        include fastcgi_params;
+	        fastcgi_param SCRIPT_FILENAME /usr/local/emhttp/plugins/dynamix/include/TaskCapture.php;
+	        fastcgi_param SCRIPT_NAME /plugins/dynamix/include/TaskCapture.php;
+	        fastcgi_param REQUEST_URI "/task-capture/$nchan_channel_id";
+	        # Nchan forwards the published message as the request body. Use GET
+	        # for the internal FastCGI hop so the global browser-facing CSRF
+	        # check does not reject this trusted, non-browser request.
+	        fastcgi_param REQUEST_METHOD GET;
+	        fastcgi_param QUERY_STRING "type=$nchan_channel_id";
+	        fastcgi_param HTTP_X_TASK_CAPTURE 1;
+	    }
 	    location ~ /pub/(.*)$ {
 	        nchan_publisher;
 	        nchan_channel_id "$1";
@@ -386,7 +435,7 @@ build_locations(){
 	#
 	# nchan subscriber endpoint
 	#
-	location ~ /sub/(.*)$ {
+	location ~ ^/sub/(.*)$ {
 	    nchan_subscriber;
 	    nchan_subscriber_timeout 0;
 	    # nchan_authorize_request <url here>
@@ -537,12 +586,12 @@ build_ssl(){
   # fetch LAN IP address (read management interface eth0)
   [[ -e $SYSTEM/bond0 ]] && DEV=bond0 || DEV=eth0
   [[ -e $SYSTEM/br0 ]] && DEV=br0
-  LANIP=$(ip -4 -br addr show $DEV scope global | sed -r 's/\/[0-9]+//g' | awk '{print $3;exit}')
-  LANIP6=$(ip -6 -br addr show $DEV scope global -temporary -deprecated | sed -r 's/\/[0-9]+//g' | awk '{print $3;exit}')
+  LANIP=$(ip -4 -br addr show scope global primary dev $DEV | awk '{print $3;exit}' | sed -r 's/\/[0-9]+//')
+  LANIP6=$(ip -6 -br addr show scope global primary -deprecated dev $DEV | awk '{print $3;exit}' | sed -r 's/\/[0-9]+//')
 
   # try wireless connection if no IP address on interface eth0
-  [[ -z $LANIP && -e $SYSTEM/wlan0 ]] && LANIP=$(ip -4 -br addr show wlan0 scope global | sed -r 's/\/[0-9]+//g' | awk '{print $3;exit}')
-  [[ -z $LANIP6 && -e $SYSTEM/wlan0 ]] && LANIP6=$(ip -6 -br addr show wlan0 scope global -temporary -deprecated | sed -r 's/\/[0-9]+//g' | awk '{print $3;exit}')
+  [[ -z $LANIP && -e $SYSTEM/wlan0 ]] && LANIP=$(ip -4 -br addr show scope global primary dev wlan0 | awk '{print $3;exit}' | sed -r 's/\/[0-9]+//')
+  [[ -z $LANIP6 && -e $SYSTEM/wlan0 ]] && LANIP6=$(ip -6 -br addr show scope global primary -deprecated dev wlan0 | awk '{print $3;exit}' | sed -r 's/\/[0-9]+//')
 
   # regenerate self-signed cert if local TLD changes */
   SELFCERTPATH=$SSL/certs/${LANNAME}_unraid_bundle.pem
@@ -568,21 +617,21 @@ build_ssl(){
     # define CSP frame-ancestors for cert
     CERTFA="https://*.${CERTNAME#*.}/"
     # check if Remote Access is enabled and fetch WANIP
-    if [[ -L /usr/local/sbin/unraid-api ]] && grep -qs 'wanaccess="yes"' $MYSERVERS && ! grep -qs 'username=""' $MYSERVERS; then
+    if [[ -L /usr/local/sbin/unraid-api ]] && check_remote_access; then
       WANACCESS=yes
       WANIP=$(curl https://wanip4.unraid.net/ 2>/dev/null)
-      WANIP6=$(curl https://wanip6.unraid.net/ 2>/dev/null)
+      [[ $IPV6MYUNRAIDNET == 1 ]] && WANIP6=$(curl https://wanip6.unraid.net/ 2>/dev/null)
     fi
     if [[ $CERTNAME == *\.myunraid\.net ]]; then
       # wildcard LE certificate
       # add Unraid Connect to CSP frame-ancestors for a myunraid.net cert
       CERTFA+=" https://connect.myunraid.net/"
       [[ -n $LANIP ]] && LANFQDN=$(fqdn $LANIP) SERVER_NAMES+=($LANFQDN)
-      [[ -n $LANIP6 ]] && LANFQDN6=$(fqdn $LANIP6) SERVER_NAMES+=($LANFQDN6)
+      [[ $IPV6MYUNRAIDNET == 1 && -n $LANIP6 ]] && LANFQDN6=$(fqdn $LANIP6) SERVER_NAMES+=($LANFQDN6)
       # check if remote access enabled
       if [[ -n $WANACCESS ]]; then
         [[ -n $WANIP ]] && WANFQDN=$(fqdn $WANIP) SERVER_NAMES+=($WANFQDN)
-        [[ -n $WANIP6 ]] && WANFQDN6=$(fqdn $WANIP6) SERVER_NAMES+=($WANFQDN6)
+        [[ $IPV6MYUNRAIDNET == 1 && -n $WANIP6 ]] && WANFQDN6=$(fqdn $WANIP6) SERVER_NAMES+=($WANFQDN6)
       fi
       if check; then
         # add included interfaces
@@ -592,8 +641,13 @@ build_ssl(){
           NET=$(show $ADDR)
           # skip invalid interface, LAN interface and WG VPN tunneled interfaces
           [[ -z $NET || $(show $LANIP) == $NET || (${NET:0:2} == wg && $(scan TYPE:1 $WIREGUARD/$NET.cfg) -ge 7) ]] && continue
-          [[ $(ipv $ADDR) == 4 ]] && NET_FQDN[$NET]=$(fqdn $ADDR) || NET_FQDN6[$NET]=$(fqdn $ADDR)
-          SERVER_NAMES+=($(fqdn $ADDR))
+          if [[ $(ipv $ADDR) == 4 ]]; then
+            NET_FQDN[$NET]=$(fqdn $ADDR)
+            SERVER_NAMES+=($(fqdn $ADDR))
+          elif [[ $IPV6MYUNRAIDNET == 1 ]]; then
+            NET_FQDN6[$NET]=$(fqdn $ADDR)
+            SERVER_NAMES+=($(fqdn $ADDR))
+          fi
         done
       fi
     else
@@ -630,7 +684,7 @@ build_ssl(){
   # define the default URL used to access the server
   if [[ $USE_SSL == auto ]]; then
     [[ -n $LANIP && $(ipv $LANIP) == 4 ]] && DEFAULTURL="https://$LANFQDN$PORTSSL_URL"
-    [[ -n $LANIP && $(ipv $LANIP) == 6 ]] && DEFAULTURL="https://[$LANFQDN6]$PORTSSL_URL"
+    [[ -n $LANIP6 && -n $LANFQDN6 && $(ipv $LANIP6) == 6 ]] && DEFAULTURL="https://$LANFQDN6$PORTSSL_URL"
   elif [[ $USE_SSL == yes ]]; then
     DEFAULTURL="https://$LANMDNS$PORTSSL_URL"
   else
@@ -662,12 +716,14 @@ build_ssl(){
   # defined if ts_bundle.pem present:
   echo "NGINX_TAILSCALEFQDN=\"$TSFQDN\"" >>$INI
   # add included interfaces
-  for NET in ${!NET_FQDN[@]}; do
+  for NET in "${!NET_FQDN[@]}"; do
     echo "NGINX_${NET^^}FQDN=\"${NET_FQDN[$NET]}\"" >>$INI
   done
-  for NET in ${!NET_FQDN6[@]}; do
-    echo "NGINX_${NET^^}FQDN6=\"${NET_FQDN6[$NET]}\"" >>$INI
-  done
+  if [[ $IPV6MYUNRAIDNET == 1 ]]; then
+    for NET in "${!NET_FQDN6[@]}"; do
+      echo "NGINX_${NET^^}FQDN6=\"${NET_FQDN6[$NET]}\"" >>$INI
+    done
+  fi
   # atomically update file
   mv $INI ${INI%.*}
 }
@@ -716,7 +772,7 @@ nginx_start(){
     # side-load unraid-api
     unraid_api_control start
     # resume nchan publishers
-    /usr/local/sbin/monitor_nchan start 
+    /usr/local/sbin/monitor_nchan start
     rm -f /tmp/publishPaused
 
     if nginx_running; then REPLY="Started"; else REPLY="Failed"; fi
@@ -736,7 +792,7 @@ nginx_stop(){
     kill -QUIT $(cat $PID)
     nginx_waitfor_shutdown
     # safety hammer
-    pkill -f $NGINX
+    pkill --ns $$ -f $NGINX
     nginx_waitfor_shutdown
     if ! nginx_running; then REPLY="Stopped"; else REPLY="Failed"; fi
   fi
@@ -806,7 +862,7 @@ nginx_reload(){
 
 nginx_renew(){
   # stop unconditionally
-  pkill -f $NGINX
+  pkill --ns $$ -f $NGINX
   # rebuild configuration
   build_ssl
   # start unconditionally

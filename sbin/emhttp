@@ -27,10 +27,13 @@
 # run & log functions
 . /etc/rc.d/rc.runlog
 
-while getopts ":p:r" OPT; do
+DEBUG_OPT=()
+
+while getopts ":p:rd:" OPT; do
   case $OPT in
     p) ;;
     r) ;;
+    d) DEBUG_OPT=(-d "$OPTARG") ;;
     *) echo "unknown option $OPT"
        exit 1
   esac
@@ -41,12 +44,12 @@ case "${1:-start}" in
 'start')
   log "Starting emhttpd..."
   # verify emhttpd not already started
-  if [[ -n $(pgrep emhttpd) ]]; then
+  if [[ -n $(pgrep --ns $$ emhttpd) ]]; then
     log "emhttpd already started."
     exit 1
   fi
   # start emhttpd
-  /usr/libexec/unraid/emhttpd
+  /usr/libexec/unraid/emhttpd "${DEBUG_OPT[@]}"
   ;;
 'stop')
   log "Stopping web services..."
@@ -54,7 +57,7 @@ case "${1:-start}" in
   /etc/rc.d/rc.nginx stop
   /etc/rc.d/rc.php-fpm stop
   log "Stopping emhttpd..."
-  pkill emhttpd
+  pkill --ns $$ emhttpd
   rmmod md-mod
   log "All services...  Stopped."
   ;;

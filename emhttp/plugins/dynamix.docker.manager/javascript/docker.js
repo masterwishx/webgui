@@ -2,7 +2,7 @@ var eventURL = '/plugins/dynamix.docker.manager/include/Events.php';
 
 function addDockerContainerContext(container, image, template, started, paused, update, autostart, webui, tswebui, shell, id, Support, Project, Registry, donateLink, ReadMe) {
   var opts = [];
-  context.settings({right:false,above:'auto'});
+  context.settings({right:false,above:false});
   if (started && !paused) {
     if (webui !== '' && webui != '#') opts.push({text:_('WebUI'), icon:'fa-globe', action:function(e){e.preventDefault();window.open(webui,'_blank');}});
     if (tswebui !== '' && tswebui != '#') opts.push({text:_('Tailscale WebUI'), icon:'fa-globe', action:function(e){e.preventDefault();window.open(tswebui,'_blank');}});
@@ -51,6 +51,8 @@ function addDockerContainerContext(container, image, template, started, paused, 
   }
   context.destroy('#'+id);
   context.attach('#'+id, opts);
+  $('#dropdown-'+id).css('z-index', 10001)
+    .append('<li class="docker-dropdown-spacer" aria-hidden="true" style="position:absolute;top:100%;left:0;width:1px;height:60px;pointer-events:none;list-style:none"></li>');
 }
 function addDockerImageContext(image, imageTag) {
   var opts = [];
@@ -63,9 +65,9 @@ function popupWithIframe(title, cmd, reload, func) {
   $('#iframe-popup').dialog({
     autoOpen:true,
     title:title,
-    height: 600,
-    width: 900,
-    draggable:true,
+    height: 'auto',
+    width: 'auto',
+    draggable: false,
     resizable:true,
     modal:true,
     open:function(ev, ui){
@@ -105,7 +107,7 @@ function updateContainer(container) {
   swal({
     title:_('Are you sure?'),text:_('Update container')+': '+container, type:'warning',html:true,showCancelButton:true,closeOnConfirm:false,confirmButtonText:_('Yes, update it!'),cancelButtonText:_('Cancel')
   },function(){
-    openDocker('update_container '+encodeURIComponent(container),_('Updating the container'),'','loadlist');
+    openDocker('update_container '+encodeURIComponent(container),_('Update container')+': '+container,'','loadlist');
   });
 }
 function rmContainer(container, image, id) {
@@ -180,7 +182,7 @@ function updateAll() {
   $('input[type=button]').prop('disabled',true);
   var ct = [];
   for (var i=0,d; d=docker[i]; i++) if (d.update==1) ct.push(encodeURIComponent(d.name));
-  openDocker('update_container '+ct.join('*'),_('Updating all Containers'),'','loadlist');
+  openDocker('update_container '+ct.join('*'),_('Updating all Containers')+' ('+ct.length+')','','loadlist');
 }
 function rebuildAll() {
   $('input[type=button]').prop('disabled',true);

@@ -353,11 +353,18 @@ class Libvirt {
 			}
 			if (!empty($domain['cpumigrate'])) $cpumigrate = " migratable='".$domain['cpumigrate']."'";
 		}
+		$cpupmemlmt ='';
+		if ($domain['cpupmemlmt'] != "None") {
+			$escaped_limit = htmlspecialchars($domain['cpupmemlmt'], ENT_QUOTES | ENT_XML1);
+			if ($domain['cpumode'] == 'host-passthrough') $cpupmemlmt = "<maxphysaddr mode='passthrough' limit='{$escaped_limit}'/>";
+			else $cpupmemlmt = "<maxphysaddr mode='emulate' bits='{$escaped_limit}'/>";
+		}
 		#<cpu mode='custom' match='exact' check='partial'>
 		#<model fallback='allow'>Skylake-Client-noTSX-IBRS</model>
 		$cpustr = "<cpu $cpumode $cpumigrate>
 			<topology sockets='1' cores='{$intCores}' threads='{$intThreads}'/>
 			$cpucache
+			$cpupmemlmt
 			$cpufeatures
 			</cpu>
 			<vcpu placement='static'>{$vcpus}</vcpu>
@@ -742,6 +749,8 @@ class Libvirt {
 					if ($strProtocol == "spice")  $virtualaudio = "spice"; else  $virtualaudio = "none";
 					$strEGLHeadless = "";
 					$strAccel3d ="";
+					$additionalqxlheads = "";
+					$qxlheads=1;
 					if ($strModelType == "virtio3d") {
 						$strModelType = "virtio";
 						if (!isset($gpu['render'])) $gpu['render'] = "auto";
@@ -756,6 +765,29 @@ class Libvirt {
 					if ($strModelType == "qxl") {
 						if (empty($gpu['DisplayOptions'])) $gpu['DisplayOptions'] ="ram='65536' vram='16384' vgamem='16384' heads='1' primary='yes'";
 						$strDisplayOptions = $gpu['DisplayOptions'];
+						preg_match_all("/(\w+)='([^']+)'/", $strDisplayOptions, $headmatches, PREG_SET_ORDER);
+						$headparams = [];
+						foreach ($headmatches as $headmatch) {
+							$headparams[$headmatch[1]] = $headmatch[2];
+						}
+
+						// Default heads to 1 if not found
+						$qxlheads = isset($headparams['heads']) ? (int)$headparams['heads'] : 1;
+
+						$additionalqxlheads= '';
+						if ($os_type == "windows") {
+							for ($i = 0; $i < $qxlheads - 1; $i++) {
+								$function = '0x' . dechex($i + 1);
+								$qxlvideo = <<<XML
+							<video> 
+							<model type='qxl' ram='{$headparams['ram']}' vram='{$headparams['vram']}' vgamem='{$headparams['vgamem']}' heads='1'/>
+							<address type='pci' domain='0x0000' bus='0x00' slot='0x1e' function='$function'/>
+							</video>
+
+							XML;
+								$additionalqxlheads .= $qxlvideo;
+							}
+						}
 					}
 					$vmrc = "<input type='tablet' bus='usb'/>
 						<input type='mouse' bus='ps2'/>
@@ -771,13 +803,16 @@ class Libvirt {
 						</model>
 						<address type='pci' domain='0x0000' bus='0x00' slot='0x1e' function='0x0'/>
 						</video>
+						$additionalqxlheads
 						<audio id='1' type='$virtualaudio'/>";
-					if ($gpu['copypaste'] == "yes") {
-						if ($strProtocol == "spice") {
+					if ($strProtocol == "spice") {
+						if ($gpu['copypaste'] == "yes" || $qxlheads > 1) {
 							$channelscopypaste = "<channel type='spicevmc'>
 								<target type='virtio' name='com.redhat.spice.0'/>
 								</channel>";
-						} else {
+						}
+					} else {
+						if ($gpu['copypaste'] == "yes") {
 							$channelscopypaste = "<channel type='qemu-vdagent'>
 								<source>
 								<clipboard copypaste='yes'/>
@@ -786,7 +821,7 @@ class Libvirt {
 								<target type='virtio' name='com.redhat.spice.0'/>
 								</channel>";
 						}
-					} else $channelcopypaste = "";
+					}
 					continue;
 				}
 				[$gpu_bus, $gpu_slot, $gpu_function] = my_explode(":", str_replace('.', ':', $gpu['id']), 3);
@@ -839,6 +874,7 @@ class Libvirt {
 			}
 		}
 		$audiodevs_used=[];
+		$soundcards = "";
 		if (!empty($audios)) {
 			foreach ($audios as $i => $audio) {
 				$strSpecialAddressAudio = "";
@@ -847,21 +883,28 @@ class Libvirt {
 					continue;
 				}
 				[$audio_bus, $audio_slot, $audio_function] = my_explode(":", str_replace('.', ':', $audio['id']), 3);
-				if ($audio_function != 0) {
-					if (isset($multidevices[$audio_bus]))	{
-						$newaudio_bus = $multidevices[$audio_bus];
-						if ($machine_type == "pc") $newaudio_slot = "0x01"; else $newaudio_slot = "0x00";
-						$strSpecialAddressAudio = "<address type='pci' domain='0x0000' bus='$newaudio_bus' slot='$newaudio_slot'  function='0x".$audio_function."' />";
+				if ($audio_bus == "virtual")
+				{
+					$soundcards .= "<sound model='$audio_function'>
+      					<alias name='sound0'/>
+    					</sound>";
+				} else {
+					if ($audio_function != 0) {
+						if (isset($multidevices[$audio_bus]))	{
+							$newaudio_bus = $multidevices[$audio_bus];
+							if ($machine_type == "pc") $newaudio_slot = "0x01"; else $newaudio_slot = "0x00";
+							$strSpecialAddressAudio = "<address type='pci' domain='0x0000' bus='$newaudio_bus' slot='$newaudio_slot'  function='0x".$audio_function."' />";
+						}
 					}
+					$pcidevs .= "<hostdev mode='subsystem' type='pci' managed='yes'>
+						<driver name='vfio'/>
+						<source>
+						<address domain='0x0000' bus='0x".$audio_bus."' slot='0x".$audio_slot."' function='0x".$audio_function."'/>
+						</source>
+						$strSpecialAddressAudio
+						</hostdev>";
+					$audiodevs_used[] = $audio['id'];
 				}
-				$pcidevs .= "<hostdev mode='subsystem' type='pci' managed='yes'>
-					<driver name='vfio'/>
-					<source>
-					<address domain='0x0000' bus='0x".$audio_bus."' slot='0x".$audio_slot."' function='0x".$audio_function."'/>
-					</source>
-					$strSpecialAddressAudio
-					</hostdev>";
-				$audiodevs_used[] = $audio['id'];
 			}
 		}
 		$pcidevs_used=[];
@@ -951,6 +994,7 @@ class Libvirt {
 				$vmrc
 				<console type='pty'/>
 				$scsicontroller
+				$soundcards
 				$pcidevs
 				$usbstr
 				<channel type='unix'>
@@ -1578,7 +1622,7 @@ class Libvirt {
 
 	function domain_get_all_domain_stats() {
 		$tmp = libvirt_connect_get_all_domain_stats($this->conn);
-		return $tmp ?: $this->_set_last_error();
+		return $tmp === false ? $this->_set_last_error() : $tmp;
 	}
 
 	function domain_start($dom) {
@@ -1996,6 +2040,23 @@ class Libvirt {
 		return $var;
 	}
 
+	function domain_get_cpu_pmem_limit($domain) {
+		$cpu_mode = $this->get_xpath($domain, '//domain/cpu/@mode', false);
+		if (!$cpu_mode) return "None";
+
+		$cpu_mode = $cpu_mode[0];
+
+		if ($cpu_mode === 'host-passthrough') {
+			$limit = $this->get_xpath($domain, '//domain/cpu/maxphysaddr/@limit', false);
+			return $limit ? intval($limit[0]) : "None";
+		} elseif (in_array($cpu_mode, ['custom', 'host-model'])) {
+			$bits = $this->get_xpath($domain, '//domain/cpu/maxphysaddr/@bits', false);
+			return $bits ? intval($bits[0]) : "None";
+		}
+
+		return "None"; // no limit found or not enforced
+	}
+
 	# <cpu mode='custom' match='exact' check='partial'>
 	# <model fallback='allow'>Skylake-Client-noTSX-IBRS</model>
 
@@ -2255,6 +2316,35 @@ class Libvirt {
 		$devs_pci = $this->domain_get_host_devices_pci($domain);
 		$devs_usb = $this->domain_get_host_devices_usb($domain);
 		return ['pci' => $devs_pci, 'usb' => $devs_usb];
+	}
+
+	function domain_get_sound_cards($domain) {
+		$soundcardslist = [];
+		$strDOMXML = $this->domain_get_xml($domain);
+		$xmldoc = new DOMDocument();
+		$xmldoc->loadXML($strDOMXML);
+		$xpath = new DOMXPath($xmldoc);
+		$objNodes = $xpath->query('//domain/devices/sound');
+		if ($objNodes->length > 0) {
+			foreach ($objNodes as $objNode) { 
+					$soundcardslist[] = [
+						'model' => $xpath->query('@model', $objNode)->Item(0)->nodeValue
+					];
+				}
+		}
+		return $soundcardslist;
+	}
+	  
+	function domain_get_vm_pciids($domain) {
+		$hostdevs=$this->domain_get_host_devices_pci($domain);
+		$vmpcidevs=[];
+		foreach($hostdevs as $key => $dev) {
+			$vmpcidevs[$dev['id']] = [
+				'vendor_id' =>  ltrim($dev['vendor_id'] ?? "", '0x'),
+				'device_id' =>  ltrim($dev['product_id'] ?? "", '0x'),
+			];
+		}
+		return $vmpcidevs;
 	}
 
 	function get_nic_info($domain) {

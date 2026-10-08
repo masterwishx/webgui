@@ -1,7 +1,7 @@
 #!/usr/bin/php -q
 <?PHP
-/* Copyright 2005-2024, Lime Technology
- * Copyright 2024-2024, Simon Fairweather.
+/* Copyright 2005-2025, Lime Technology
+ * Copyright 2024-2025, Simon Fairweather.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License version 2,
@@ -80,19 +80,16 @@ while (true) {
       $echodata .= my_scale($vmdata['mem']*1024,$unit,null,null,1024)."$unit / ".my_scale($vmdata['curmem']*1024,$unit,null,null,1024)."$unit";
       if ($vmdata['curmem'] === $vmdata['maxmem']) $echodata .= " </td><td>";
       else $echodata .= " / " .my_scale($vmdata['maxmem']*1024,$unit,null,null,1024)."$unit </td><td>";
-      $echodata .=  _("Read").": ".my_scale($vmdata['rdrate']/$timer,$unit,null,null,1024)."$unit/s<br>"._("Write").": ".my_scale($vmdata['wrrate']/$timer,$unit,null,null,1024)."$unit/s</td><td>";
-      $echodata .=  _("RX").": ".my_scale($vmdata['rxrate']/$timer,$unit,null,null,1024)."$unit/s<br>"._("TX").": ".my_scale($vmdata['txrate']/$timer,$unit,null,null,1024)."$unit/s</td></tr>";
+      $echodata .=  _("Read").": ".my_scale($vmdata['rdrate'],$unit,null,null,1024)."$unit/s<br>"._("Write").": ".my_scale($vmdata['wrrate'],$unit,null,null,1024)."$unit/s</td><td>";
+      $echodata .=  _("RX").": ".my_scale($vmdata['rxrate'],$unit,null,null,1024)."$unit/s<br>"._("TX").": ".my_scale($vmdata['txrate'],$unit,null,null,1024)."$unit/s</td></tr>";
     }
     $echo = $echodata ;
   }
   if ($running < 1) $echo = "<tr><td colspan='7' style='text-align:center;padding-top:12px'>"._('No VMs running')."</td></tr>";
  
-  $echo = json_encode($echo);
-  $md5_new = md5($echo,true);
-  if ($md5_new !== $md5_old) {
-    $md5_old = publish('vm_usage',$echo)!==false ? $md5_new : -1;
-  }
-
+  publish_noDupe('vm_usage',json_encode($echo));
+  ping('vmPing');
+  
   sleep($timer);
 }
 ?>

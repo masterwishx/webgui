@@ -6,17 +6,22 @@
 #
 # Bergware - created for Unraid OS, January 2025
 
+# Adapted by Bergware for use in Unraid OS - June 2025
+# - put metric value at end of assignment
+
 DAEMON="WiFi network"
 CALLER="wifi"
 INI="/var/local/emhttp/wireless.ini"
 CFG="/boot/config/wireless.cfg"
+DOCKER="/boot/config/docker.cfg"
 OPENSSL="/usr/local/emhttp/webGui/scripts/open_ssl"
 STARTWIFI="/usr/local/emhttp/webGui/scripts/wireless"
+SERVICES="/usr/local/emhttp/webGui/scripts/update_services"
 WPA="/etc/wpa_supplicant.conf"
 
 # system network references
-SYSTEM=/sys/class/net
-CONF6=/proc/sys/net/ipv6/conf
+SYSTEM="/sys/class/net"
+CONF6="/proc/sys/net/ipv6/conf"
 
 # run & log functions
 . /etc/rc.d/rc.runlog
@@ -28,46 +33,76 @@ CONF6=/proc/sys/net/ipv6/conf
 [[ -r $INI ]] && . $INI
 PORT=${PORT:-wlan0}
 
+# return variable value from file
+var(){
+  [[ -r "$2" ]] && grep -Pom1 "^$1=\"\K[^\"]+" "$2"
+}
+
+# return interface index
+index(){
+  cat $SYSTEM/$1/ifindex 2>/dev/null
+}
+
 # translate security to informational text
 trans(){
   case "$1" in
-    "open") echo "Open network" ;;
-    "PSK") echo "WPA2 Personal" ;;
+    "IEEE-802.1X/SHA-256") echo "WPA3 Enterprise" ;;
+    "IEEE-802.1X") echo "WPA2 Enterprise" ;;
     "SAE") echo "WPA3 Personal" ;;
-    "IEEE 802.1X") echo "WPA2 Enterprise" ;;
-    "IEEE 802.1X/SHA-256") echo "WPA3 Enterprise" ;;
+    "PSK") echo "WPA2 Personal" ;;
+    "WEP") echo "WEP (decprecated)" ;;
+    "open") echo "Open network" ;;
+    "FT/IEEE-802.1X" | "FT/SAE" | "FT/PSK") echo "Roaming Profile" ;;
     *) echo "$1" ;;
   esac
 }
 
-# function to remove leading zeros in IPv4 address
+# set security priority
+priority(){
+  case "$1" in
+    "IEEE-802.1X/SHA-256") echo 25 ;;
+    "FT/IEEE-802.1X") echo 18 ;;
+    "IEEE-802.1X") echo 15 ;;
+    "FT/SAE") echo 12 ;;
+    "SAE") echo 10 ;;
+    "FT/PSK") echo 8 ;;
+    "PSK") echo 6 ;;
+    "WEP") echo 4 ;;
+    "open") echo 2 ;;
+    *) echo 1 ;;
+  esac
+}
+
+# remove leading zeros in IPv4 address
 unzero(){
   local M Q
   echo -n $(for Q in ${1//./ }; do printf "$M%x" "0x$Q"; M=.; done)
 }
 
-# function to remove leading zeros in IPv6 address
+# remove leading zeros in IPv6 address
 unzero6(){
   local A M Q
   A=${1/::/:-:}
   echo -n $(for Q in ${A//:/ }; do [[ $Q != - ]] && printf "$M%x" "0x$Q" || printf ":"; M=:; done)
 }
 
-# function to convert text to hex
+# convert text to hex
 hex(){
   echo -n $1 | od -An -tx1 | tr -d ' \n'
 }
 
-# function to wait for carrier of interface
-carrier_up(){
-  local n
-  for n in {1..10}; do
-    [[ $(cat $SYSTEM/$1/carrier 2>/dev/null) == 1 ]] && return 0 || sleep 1
+# wait for interface to go up
+carrier(){
+  local n e
+  [[ -e $SYSTEM/$1 ]] && e=${2:-10} || return 1
+  for ((n=0; n<$e; n++)); do
+    [[ $(cat $SYSTEM/$1/carrier 2>/dev/null) == 1 ]] && return 0
+    [[ $e -gt 1 ]] && sleep 1
   done
   return 1
 }
 
-# function to enable/disable ipv6 assignment per interface
+# enable/disable ipv6 assignment per interface
 ipv6_addr(){
   if [[ -d $CONF6/$1 ]]; then
     echo $2 >$CONF6/$1/accept_ra
@@ -76,7 +111,7 @@ ipv6_addr(){
   fi
 }
 
-# function to assign IP address
+# assign IP address
 ipaddr_up(){
   # disable IPv6 per interface when IPv4 only
   [[ $IP == ipv4 ]] && DISABLE6=1 || DISABLE6=0
@@ -89,7 +124,7 @@ ipaddr_up(){
     [[ $DNS == yes ]] && OPTIONS="$OPTIONS -C resolv.conf"
     [[ $IP == ipv4 ]] && OPTIONS="$OPTIONS -4"
     [[ $IP == ipv6 ]] && OPTIONS="$OPTIONS -6"
-    if carrier_up $PORT; then
+    if carrier $PORT; then
       # interface is UP
       log "interface $PORT is UP, polling up to 60 sec for DHCP $IP server"
       if ! run timeout 60 dhcpcd -w $OPTIONS $PORT; then
@@ -103,16 +138,24 @@ ipaddr_up(){
     fi
   elif [[ $DHCP == no ]]; then
     # bring up interface using static IP address
-    if carrier_up $PORT; then STATE="UP"; else STATE="DOWN"; fi
+    if carrier $PORT; then STATE="UP"; else STATE="DOWN"; fi
     log "interface $PORT is $STATE, setting static $IP address"
     ipv6_addr $PORT 0 1
+    INDEX=$(index $PORT)
+    INDEX=$((3000 + ${INDEX:-$(($(index * | sort -n | tail -1) + 1))}))
     if [[ $IP == ipv4 ]]; then
-      [[ -n $IP4 && -n $MASK4 ]] && run ip -4 addr add $(unzero $IP4)/$MASK4 dev $PORT metric 3004
-      [[ -n $GATEWAY4 ]] && run ip -4 route add default via $GATEWAY4 dev $PORT metric 3004
+      if [[ -n $IP4 && -n $MASK4 ]]; then
+        run ip -4 addr add $(unzero $IP4)/$MASK4 dev $PORT metric $INDEX
+        # re-add IPv4 address of parent (if docker is running)
+        if [[ $(var DOCKER_ALLOW_ACCESS $DOCKER) == yes && -S /var/run/docker.sock ]]; then
+          ip addr add $(unzero $IP4)/$MASK4 dev shim-$PORT metric $(($INDEX - 1))
+        fi
+      fi
+      [[ -n $GATEWAY4 ]] && run ip -4 route add default via $GATEWAY4 dev $PORT metric $INDEX
     fi
     if [[ $IP == ipv6 ]]; then
-      [[ -n $IP6 && -n $MASK6 ]] && run ip -6 addr add $(unzero6 $IP6)/$MASK6 dev $PORT metric 3004
-      [[ -n $GATEWAY6 ]] && run ip -6 route add default via $GATEWAY6 dev $PORT metric 3004
+      [[ -n $IP6 && -n $MASK6 ]] && run ip -6 addr add $(unzero6 $IP6)/$MASK6 dev $PORT metric $INDEX
+      [[ -n $GATEWAY6 ]] && run ip -6 route add default via $GATEWAY6 dev $PORT metric $INDEX
     fi
   fi
   if [[ $DNS == yes ]]; then
@@ -124,21 +167,17 @@ ipaddr_up(){
   fi
 }
 
-# function to release IP address
+# release IP address
 ipaddr_down(){
   if [[ $DHCP == yes ]]; then
     # release DHCP assigned address and default route
-    OPTIONS="-q -k"
+    OPTIONS="-q -k -$1"
     [[ $DNS == yes ]] && OPTIONS="$OPTIONS -C resolv.conf"
-    [[ $IP == ipv4 ]] && OPTIONS="$OPTIONS -4"
-    [[ $IP == ipv6 ]] && OPTIONS="$OPTIONS -6"
     run dhcpcd $OPTIONS $PORT
   elif [[ $DHCP == no ]]; then
     # release static assigned address and default route
-    [[ $IP == ipv4 ]] && run ip -4 addr flush dev $PORT
-    [[ $IP == ipv4 ]] && run ip -4 route flush default dev $PORT
-    [[ $IP == ipv6 ]] && run ip -6 addr flush dev $PORT
-    [[ $IP == ipv6 ]] && run ip -6 route flush default dev $PORT
+    run ip -$1 addr flush dev $PORT
+    run ip -$1 route flush default dev $PORT
   fi
 }
 
@@ -153,38 +192,42 @@ ipaddr_down(){
 # WPA3 Enterprise         OK
 
 wpa_configuration(){
+  log "wpa_configuration: $(trans "$1")"
   if [[ ! -e $WPA ]]; then
     echo "bgscan=\"\"" >$WPA
+    echo "ctrl_interface=/run/wpa_supplicant" >>$WPA
     [[ -n $CC ]] && echo "country=${CC,,}" >>$WPA
   fi
-  if [[ $1 == "PSK" ]]; then
+  if [[ $1 =~ "PSK" ]]; then
     PSK=$(wpa_passphrase "$SSID" "$PASSWORD" 2>/dev/null | grep -Pom1 '^\s+psk=\K.+')
     [[ -z $PSK ]] && PSK="\"$PASSWORD\""
   fi
-  [[ -z $2 && $1 == "SAE" ]] && echo "sae_pwe=1" >>$WPA
   echo "network={" >>$WPA
   echo "ssid=\"$SSID\"" >>$WPA
   echo "scan_ssid=1" >>$WPA
   [[ $1 == "open" ]] && echo "key_mgmt=NONE" >>$WPA
   [[ $1 == "PSK" ]] && echo "key_mgmt=WPA-PSK" >>$WPA
+  [[ $1 == "FT/PSK" ]] && echo "key_mgmt=FT-PSK" >>$WPA
   [[ $1 == "SAE" ]] && echo "key_mgmt=SAE" >>$WPA
-  [[ $1 == "IEEE 802.1X" ]] && echo "key_mgmt=WPA-EAP" >>$WPA
-  [[ $1 == "IEEE 802.1X/SHA-256" ]] && echo "key_mgmt=WPA-EAP-SHA256" >>$WPA
-  [[ $1 == "PSK" ]] && echo "psk=$PSK" >>$WPA
-  [[ $1 == "SAE" ]] && echo "sae_password=\"$PASSWORD\"" >>$WPA
+  [[ $1 == "FT/SAE" ]] && echo "key_mgmt=FT-SAE" >>$WPA
+  [[ $1 == "IEEE-802.1X" ]] && echo "key_mgmt=WPA-EAP" >>$WPA
+  [[ $1 == "FT/IEEE-802.1X" ]] && echo "key_mgmt=FT-EAP" >>$WPA
+  [[ $1 == "IEEE-802.1X/SHA-256" ]] && echo "key_mgmt=WPA-EAP-SHA256" >>$WPA
+  [[ $1 =~ "PSK" ]] && echo "psk=$PSK" >>$WPA
+  [[ $1 =~ "SAE" ]] && echo "sae_password=\"$PASSWORD\"" >>$WPA
   [[ $1 =~ "IEEE" ]] && echo "eap=PEAP" >>$WPA
   [[ $1 =~ "IEEE" ]] && echo "identity=\"$USERNAME\"" >>$WPA
   [[ $1 =~ "IEEE" ]] && echo "password=\"$PASSWORD\"" >>$WPA
-  [[ $1 == "IEEE 802.1X" ]] && echo "ieee80211w=1" >>$WPA
-  [[ $1 == "SAE" || $1 == "IEEE 802.1X/SHA-256" ]] && echo "ieee80211w=2" >>$WPA
+  [[ $1 == "IEEE-802.1X" || $1 == "FT/IEEE-802.1X" ]] && echo "ieee80211w=1" >>$WPA
+  [[ $1 =~ "SAE" || $1 == "IEEE-802.1X/SHA-256" ]] && echo "ieee80211w=2" >>$WPA
   [[ $1 =~ "IEEE" ]] && echo "phase2=\"auth=MSCHAPV2\"" >>$WPA
-  [[ -n $2 ]] && echo "priority=$2" >>$WPA
+  echo "priority=$(priority "$1")" >>$WPA
   echo "}" >>$WPA
 }
 
 wifi_running(){
   sleep 0.1
-  [[ $(cat $SYSTEM/$PORT/carrier 2>/dev/null) == 1 ]]
+  carrier $PORT 1
 }
 
 wifi_start(){
@@ -211,11 +254,11 @@ wifi_start(){
   $OPENSSL load
   # start active SSID
   $STARTWIFI
-  if ! carrier_up $PORT; then
+  if ! wifi_running; then
     # try the saved SSIDs
     for SSID in $(grep -P '^\[.+\]$' $CFG | sed 1d | sed -r 's/\[|\]/"/g'); do
       [[ -n $SSID ]] && $STARTWIFI "$SSID" || break
-      if carrier_up $PORT; then break; fi
+      if wifi_running; then break; fi
     done
   fi
   if wifi_running; then REPLY="Started"; else REPLY="Failed"; fi
@@ -229,19 +272,25 @@ wifi_stop(){
     log "$DAEMON...  No Wifi present."
     return
   fi
-  IP=ipv4
   DHCP=$DHCP4
   DNS=$DNS4
-  ipaddr_down
+  SRV4=$DNS
+  SRV6=
+  ipaddr_down 4
   if [[ -n $DHCP6 ]]; then
-    IP=ipv6
     DHCP=$DHCP6
     DNS=$DNS6
-    ipaddr_down
+    SRV6=$DNS
+    ipaddr_down 6
   fi
-  run pkill wpa_supplicant
+  IPV4=$(ip -4 -br addr show scope global primary dev shim-$PORT | awk '{print $3,$4,$5;exit}')
+  [[ -n $IPV4 ]] && run ip addr del $IPV4 dev shim-$PORT
+  run ip addr flush dev $PORT
+  run pkill --ns $$ wpa_supplicant
   run iw dev $PORT disconnect
   run rm -f $INI
+  # restart services when static assignments
+  [[ $SRV4 == no && (-z $SRV6 || $SRV6 == no) ]] && $SERVICES 5
   if ! wifi_running; then REPLY="Stopped"; else REPLY="Failed"; fi
   log "$DAEMON...  $REPLY."
 }
@@ -269,36 +318,24 @@ wifi_join(){
     sed -ri "s/^(PASSWORD=\").+$/\1$ENCRYPT2\"/" $CFG
   fi
   SECURITY=${SECURITY:-$ATTR3}
+  # replace space in enterprise security type
+  SECURITY=${SECURITY//IEEE 802/IEEE-802}
   # regulatory region
   REGION=$(grep -Pom1 '^REGION="\K[^"]+' $CFG)
   REGION_XX=$(grep -Pom1 '^REGION_XX="\K[^"]+' $CFG)
   [[ $REGION == '00' ]] && CC=$REGION_XX || CC=$REGION
   [[ -n $(pgrep wpa_supplicant) ]] && pkill wpa_supplicant
   rm -f $WPA
-  if [[ $SECURITY == "auto" ]]; then
-    log "wpa_configuration: Automatic detection"
-    wpa_configuration "IEEE 802.1X/SHA-256" 25
-    wpa_configuration "IEEE 802.1X" 18
-    wpa_configuration "SAE" 15
-    wpa_configuration "PSK" 12
-    wpa_configuration "open" 10
-  elif [[ $SECURITY == "IEEE 802.1X IEEE 802.1X/SHA-256" ]]; then
-    log "wpa_configuration: WPA2/WPA3 Enterprise"
-    wpa_configuration "IEEE 802.1X/SHA-256" 25
-    wpa_configuration "IEEE 802.1X" 18
-  elif [[ $SECURITY == "PSK SAE" ]]; then
-    log "wpa_configuration: WPA2/WPA3 Personal"
-    wpa_configuration "SAE" 15
-    wpa_configuration "PSK" 12
-  else
-    log "wpa_configuration: $(trans "$SECURITY")"
-    wpa_configuration "$SECURITY"
-  fi
+  # list of possible security types when "auto"
+  [[ $SECURITY == "auto" ]] && SECURITY="IEEE-802.1X/SHA-256 FT/IEEE-802.1X IEEE-802.1X FT/SAE SAE FT/PSK PSK open"
+  for TYPE in $SECURITY; do wpa_configuration "$TYPE"; done
   run wpa_supplicant -B -q -i $PORT -c $WPA
   # IPv4 address assignment
   IP=ipv4
   DHCP=$DHCP4
   DNS=$DNS4
+  SRV4=$DNS
+  SRV6=
   ipaddr_up
   # IPv6 address assignment (if enabled)
   if [[ -n $DHCP6 ]]; then
@@ -306,10 +343,13 @@ wifi_join(){
     IP=ipv6
     DHCP=$DHCP6
     DNS=$DNS6
+    SRV6=$DNS
     ipaddr_up
   else
     echo 1 >$CONF6/$PORT/disable_ipv6
   fi
+  # restart services when static assignments
+  [[ $SRV4 == no && (-z $SRV6 || $SRV6 == no) ]] && $SERVICES 5
   if wifi_running; then
     if [[ -z $CC ]]; then
       CC=($(iw reg get | grep -Po '^country \K..'))

@@ -13,13 +13,45 @@
 <?
 $docroot ??= ($_SERVER['DOCUMENT_ROOT'] ?: '/usr/local/emhttp');
 require_once "$docroot/webGui/include/Wrappers.php";
+require_once "$docroot/plugins/dynamix/include/TaskQueue.php";
+
+// true when the backend task queue has an active/queued task targeting this .plg
+// (the task queue is the source of truth for an in-flight install/update)
+function plugin_task_busy($arg) {
+  if (!$arg) return false;
+  foreach (task_list() as $t) {
+    if ($t['type']==='plugins' && in_array($t['status'],['running','aborting','queued'],true)
+        && in_array($arg, preg_split('/\s+/', trim($t['cmd'])), true)) return true;
+  }
+  return false;
+}
 
 // Invoke the plugin command with indicated method
-function plugin($method, $arg = '') {
+function plugin($method, $arg = '', $dontCache = false) {
   global $docroot;
-  exec("$docroot/plugins/dynamix.plugin.manager/scripts/plugin ".escapeshellarg($method)." ".escapeshellarg($arg), $output, $retval);
-  return $retval==0 ? implode("\n", $output) : false;
-}
+  
+  static $methods = ['dump', 'changes', 'alert', 'validate', 'check', 'checkall', 'update', 'remove', 'install'];
+  static $pluginAttributeCache = [];
+
+  if ( in_array($method, $methods) || !$arg || $dontCache ) {
+    $pluginAttributeCache = [];
+    exec("$docroot/plugins/dynamix.plugin.manager/scripts/plugin ".escapeshellarg($method)." ".escapeshellarg($arg), $output, $retval);
+    return $retval==0 ? implode("\n", $output) : false;
+  }
+
+  if ( !isset($pluginAttributeCache[$arg]) ) {
+    $pluginAttributeCache = [];
+    $xml = file_exists($arg) ? @simplexml_load_file($arg, NULL, LIBXML_NOCDATA) : false;
+    if ( $xml ) {
+      $attributes = $xml->attributes();
+      $pluginAttributeCache[$arg] = (array)$attributes ?: ["error" => "no attributes present"];
+    }
+  }
+  if ( $method == 'attributes' ) {
+    return is_file($arg) ? json_encode($pluginAttributeCache[$arg]['@attributes']) : false;
+  }
+  return (is_file($arg) && isset($pluginAttributeCache[$arg]['@attributes'][$method]) ) ? (string)$pluginAttributeCache[$arg]['@attributes'][$method] : false;
+} 
 
 // Invoke the language command with indicated method
 function language($method, $arg = '') {
@@ -51,7 +83,10 @@ function make_link($method, $arg, $extra='') {
     $cmd  = "plugin $method $arg".($extra?" $extra":"");
     $func = "loadlist";
   }
-  if (is_file("/tmp/plugins/pluginPending/$arg") && !$check) {
+  if (in_array($method,['update','install']) && plugin_task_busy($arg)) {
+    $label = $method=='install' ? _('Installing') : _('Upgrading');
+    return "<span class='orange-text'><i class='fa fa-hourglass-o fa-fw'></i>&nbsp;$label</span>";
+  } elseif (is_file("/tmp/plugins/pluginPending/$arg") && !$check) {
     return "<span class='orange-text'><i class='fa fa-hourglass-o fa-fw'></i>&nbsp;"._('pending')."</span>";
   } else {
     return "$check<input type='button' id='$id' data='$arg' class='$method' value=\""._(ucfirst($method))."\" onclick='openInstall(\"$cmd\",\""._(ucwords($method)." Plugin")."\",\"$plg\",\"$func\");'$disabled>";

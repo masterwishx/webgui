@@ -103,9 +103,9 @@ periodically to move user share files off the Cache and onto the Array.
 :end
 
 :boot_device_help:
-Vital array configuration is maintained on the USB Flash device; for this reason, it must remain
-plugged in to your server.  Click on [Flash](/Main/Flash?name=flash) to see the GUID and registration
-information, and to configure export settings.  Since the USB Flash device is formatted using FAT file system,
+Vital array configuration is maintained on the boot device; for this reason, it must remain
+plugged in to your server.  Click on [Boot Device](/Main/Boot?name=flash) to see the GUID and registration
+information, and to configure export settings.  Since the boot device is formatted using FAT file system,
 it may only be exported using SMB protocol.
 :end
 
@@ -316,10 +316,6 @@ Not much info is printed in the window, but you can verify the operation is runn
 increasing for the device on the Main page.
 :end
 
-:info_reiserfs_cancel_help:
-**Cancel** will cancel the Check operation in progress.
-:end
-
 :info_xfs_check_help:
 **Check** will run the *xfs_repair* program to check file system integrity on the device.
 
@@ -332,8 +328,35 @@ Not much info is printed in the window, but you can verify the operation is runn
 increasing for the device on the Main page.
 :end
 
-:info_xfs_cancel_help:
-**Cancel** will cancel the Check operation in progress.
+:info_ext_check_help:
+**Check** will run the *e2fsck* program to check file system integrity on the device. Despite its name, *e2fsck* is used
+to check the whole family of ext2/ext3/ext4 file systems.
+
+For **Fix** the *Options* field is initialized with *-p* option to automatically fix any file system problems that can be safely fixed
+without intervention.  If a problem is discovered which may require additional corrective action, e2fsck will print a
+description of the problem and then exit.
+
+After starting a Check, you should monitor progress and status. Depending on how large the file system is, and what errors
+might be present, the operation can take a **long time** to finish (hours).
+Not much info is printed in the window, but you can verify the operation is running by observing the read/write counters
+increasing for the device on the Main page.
+:end
+
+:info_ntfs_check_help:
+**Check** will run the *ntfsfix* program to check file system integrity on the device. This utility fixes some common NTFS
+problems; however, it is NOT a Linux version of *chkdsk*. It only repairs some fundamental NTFS inconsistencies and resets
+the NTFS journal file. If you suspect file system corruption, we recommend using the Windows *chkdsk* utility.
+
+Note: *ntfsfix* will immediately exit if a hibernation file is detected (to prevent corruption).
+
+The *Options* field is initialized with *-d* to clear the volume dirty flag if the volume can be fixed and mounted.
+:end
+
+:info_exfat_check_help:
+**Check** will run the *fsck.exfat* program to check file system integrity on the device.
+
+For **Fix** the *Options* field is initialized with *-p* to repair the filesystem without user interaction if it can
+be done safely.
 :end
 
 :info_smart_notifications_help:
@@ -419,7 +442,7 @@ array or the cache disk/pool.
 :end
 
 :flash_backup_help:
-Use *Flash backup* to create a single zip file of the current contents of the flash device and store it locally on your computer.
+Use *Boot device backup* to create a single zip file of the current contents of the boot device and store it locally on your computer.
 :end
 
 :syslinux_cfg_help:
@@ -517,10 +540,9 @@ Select the desired destinations and press **Write** to copy the settings to the 
 :share_edit_name_help:
 The share name can be up to 40 characters, and is case-sensitive with these restrictions:
 
-* cannot contain a double-quote character (") or the following characters: / \ * < > |
-* cannot be one of the reserved share names: flash, cache, cache2, .., disk1, disk2, ..
-
-We highly recommend to make your life easier and avoid special characters.
+* must start with a letter
+* subsequent characters can be a letter, digit, period, underscore, or dash, except the last character may not be a period
+* cannot be one of the reserved names: homes, global, printers, flash, boot, user, user0, dev, remotes, RecycleBin, rootshare, addons, mirror, raidz*, draid, spare, log, disk*, parity*
 :end
 
 :share_edit_comments_help:
@@ -918,6 +940,18 @@ Selects which kernel I/O scheduler to use for all array devices.
 Note: You must reboot after selecting Auto for setting to take effect.
 :end
 
+:disk_tunable_zfs_arc_max_help:
+Sets the ZFS ARC maximum size.
+
+Available modes:
+- **Unlimited (Dynamic)**: sets `zfs_arc_max=0`, allowing ARC to use as much memory as needed and release memory when the system requires it.
+- **10%..90% of memory**: uses a preset percentage of installed system memory.
+- **Custom value (GB)**: enter an explicit value in GB (limited to 90% of memory, rounded up to the next GB).
+
+When applied, the GB value is converted to bytes and written as `options zfs zfs_arc_max=...` in `/boot/config/modprobe.d/zfs.conf`.
+The running value is also applied to `/sys/module/zfs/parameters/zfs_arc_max` when available.
+:end
+
 :disk_tunable_md_num_stripes_help:
 This is the size of the *stripe pool* in number of *stripes*.  A *stripe* refers to a data structure that facilitates parallel 4K read/write
 operations necessary for a parity-protected array.
@@ -1216,7 +1250,7 @@ Enter the TELNET port, default port is 23.
 
 :mgmt_use_ssh_help:
 SSH is enabled by default and offers a secure way of CLI access. Upon system startup SSH keys are automatically generated
-if not yet existing, and stored on the flash device in the folder */config/ssh*.
+if not yet existing, and stored on the boot device in the folder */config/ssh*.
 :end
 
 :mgmt_ssh_port_help:
@@ -1352,7 +1386,7 @@ provisioned and downloaded to your server.
 
 **nginx certificate handling details**
 
-nginx makes use of two certificate files stored on the USB flash boot device:<br>
+nginx makes use of two certificate files stored on the boot device:<br>
 
 - a self-signed certificate: `config/ssl/certs/<server-name>_unraid_bundle.pem`
 
@@ -1370,7 +1404,7 @@ stabling is enabled.
 :end
 
 :ftp_server_help:
-Enable or disable the FTP server daemon. By default the FTP server is enabled.
+Enable or disable the FTP server daemon. By default the FTP server is disabled.
 This setting is not saved, i.e. upon system reboot it will revert to its default setting.
 :end
 
@@ -1526,7 +1560,6 @@ provided the following conditions are met:
 * The Primary storage for a share is set to a pool.
 * The Secondary storage for a share is set to **none**.
 * The share exists on a single volume.
-* The share is **not** exported over NFS.
 
 The advantage of *exclusive* shares is that transfers bypass the FUSE layer which may significantly
 increase I/O performance.
@@ -1597,7 +1630,7 @@ This will send a copy of the syslog messages to the designated server.
 This setting is NO by default and must be used with care to avoid unnecessary wear and tear of the USB device.
 
 Change this setting to YES when troubleshooting is required and it is not possible to get the regular diagnostics information.
-A mirror of the syslog file is stored in the **logs** folder of the flash device.
+A mirror of the syslog file is stored in the **logs** folder of the boot device.
 :end
 
 :syslog_shutdown_flash_help:
@@ -1613,6 +1646,18 @@ Choose if rebooting or powering down the server needs a confirmation checkbox.
 
 :confirm_array_stop_help:
 Choose if stopping the array needs a confirmation checkbox.
+:end
+
+:powerbutton_behavior_help:
+Choose what happens when the server's physical power button is pressed.
+
+**Shut down** performs a clean shutdown (stops the array and powers off). This is the default behavior.
+
+**Reboot** performs a clean reboot.
+
+**Do nothing** ignores the button press and only logs the event. This is useful on small form factor hardware where the power button is easily bumped, to prevent accidental shutdowns.
+
+Plugins may add further actions (for example, Sleep via the S3 Sleep plugin, or running a User Script).
 :end
 
 :display_settings_help:
@@ -1963,8 +2008,8 @@ The interface assignment rules can be changed here and might be necessary to set
 **eth0** is the main interface used to manage the Unraid system. The other interfaces are optional and may be used as desired.
 Every interface must be uniquely identified by its MAC (hardware) address.
 
-The interface assignment is stored on the flash device under */config/network-rules.cfg*. This file can be viewed with any editor, but it is recommended to make changes via the webGUI only.<br>
-Deleting the file *network-rules.cfg* from the flash device will restore automatic interface assignment after a system reboot.
+The interface assignment is stored on the boot device under */config/network-rules.cfg*. This file can be viewed with any editor, but it is recommended to make changes via the webGUI only.<br>
+Deleting the file *network-rules.cfg* from the boot device will restore automatic interface assignment after a system reboot.
 :end
 
 :eth_routing_table_help:
@@ -2125,6 +2170,10 @@ For the other schedules choose here the time of the day the mover should start.
 Write mover messages to the syslog file.
 :end
 
+:mover_progress_help:
+Enable progress display and allow a user override.
+:end
+
 :notifications_display_help:
 In *Detailed* view all notifications will be displayed on screen as soon as they arrive.<br>
 Notifications can be acknowledged individually or all at once.
@@ -2153,7 +2202,7 @@ Select the desired time format which is used in the notifications archive. Recom
 
 :notifications_store_flash_help:
 By default notifications are stored on RAM disk, which will get lost upon system reboot.
-Notifications may be stored permanently on the flash drive under folder '/boot/config/plugins/dynamix' instead.
+Notifications may be stored permanently on the boot drive under folder '/boot/config/plugins/dynamix' instead.
 :end
 
 :notifications_system_help:
@@ -2272,7 +2321,7 @@ Select a default template when it is the first time you are configuring this app
 
 **User-defined templates**<br>
 Once you've added an application to your system through a Default template,
-the settings you specified are saved to your USB flash device to make it easy to rebuild your applications in the event an upgrade were to fail or if another issue occurred.
+the settings you specified are saved to your boot device to make it easy to rebuild your applications in the event an upgrade were to fail or if another issue occurred.
 To rebuild, simply select the previously loaded application from the User-defined list and all the settings for the container will appear populated from your previous setup.
 Clicking create will redownload the necessary files for the application and should restore you to a working state.
 To delete a User-defined template, select it from the list above and click the red X to the right of it.
@@ -2334,6 +2383,12 @@ If you wish to append additional arguments AFTER the container definition, you c
 The content of this field is container specific.
 :end
 
+:docker_memory_limit_help:
+The maximum amount of memory the container is allowed to use (Docker <code>--memory</code>).<br>
+Use a plain number for bytes, or a suffix: <b>b</b>, <b>k</b>, <b>m</b>, <b>g</b> (for example <b>512m</b> or <b>2g</b>). The minimum allowed value is 6m.<br>
+Leave empty for no limit (default). If you also set <code>--memory</code> in Extra Parameters, that value takes precedence.
+:end
+
 :docker_cpu_pinning_help:
 Checking a CPU core(s) will limit the container to run on the selected cores only. Selecting no cores lets the container run on all available cores (default)
 :end
@@ -2344,6 +2399,12 @@ If the Host type is selected, the application will be given access to communicat
 Generally speaking, it is recommended to leave this setting to its default value as specified per application template.
 
 IMPORTANT NOTE:  If adjusting port mappings, do not modify the settings for the Container port as only the Host port can be adjusted.
+:end
+
+:docker_fixed_mac_help:
+Assigns the container's MAC address on the selected Docker network endpoint. Use a valid unicast MAC address; the first octet must be even, e.g. 02:42:9a:0d:7e:c0.
+
+This avoids using the legacy container-level --mac-address option in Extra Parameters.
 :end
 
 :docker_container_network_help:
@@ -2506,6 +2567,11 @@ Devices you select will be bound to the vfio-pci driver at boot, which makes the
 &nbsp;<i class="fa fa-retweet grey-orb middle"></i>&nbsp;&nbsp;&nbsp;This symbol indicates the device supports FLR (Function Level Reset).
 
 <input type="checkbox" value="" disabled>&nbsp;&nbsp;If a checkbox is greyed out it means the device is in use by Unraid OS and can not be passed through.
+
+The right two columns display the current and maximum speeds and widths (or PCIe lanes). Downgraded speeds and widths will appear in orange.
+
+Filters have been added to enable device selection. When "Show all" is active, filters are not applied. Changing any filter will switch to "filtered" mode.
+The SRIOV filter displays all devices that support SR-IOV; enabling it will activate related switches as needed. Reverting to "Show all" will turn these filter switches off.
 :end
 
 :sysdevs_thread_pairings_help:
@@ -2529,7 +2595,7 @@ Unraid server SSL port for secure web traffic.
 :end
 
 :unraidnet_inactivespanel_help:
-Click Activate to set up a local git repo for your local USB Flash boot device and connect to a dedicated remote on unraid.net tied to this server.
+Click Activate to set up a local git repo for your local boot device and connect to a dedicated remote on unraid.net tied to this server.
 :end
 
 :unraidnet_changespanel_help:
@@ -2694,7 +2760,7 @@ This page displays all the drivers available on this system. Filter the list acc
 
 Any 3rd party driver installed by a plugin will have a support symbol next to it, click this to get support for the plugin.
 
-Click the edit button to add/modify/delete any modprobe.d config file in the config/modprobe.d directory on the flash drive.
+Click the edit button to add/modify/delete any modprobe.d config file in the config/modprobe.d directory on the boot drive.
 :end
 
 :console_keyboard_help:

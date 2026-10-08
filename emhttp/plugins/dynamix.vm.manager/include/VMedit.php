@@ -22,7 +22,7 @@ if (substr($_SERVER['REQUEST_URI'],0,4) != '/VMs') {
 	require_once "$docroot/webGui/include/Translations.php";
 }
 
-switch ($display['theme']) {
+switch ($themeHelper->getThemeName()) { // $themeHelper set in DefaultPageLayout.php
 	case 'gray' : $bgcolor = '#121510'; $border = '#606e7f'; $top = -44; break;
 	case 'azure': $bgcolor = '#edeaef'; $border = '#606e7f'; $top = -44; break;
 	case 'black': $bgcolor = '#212121'; $border = '#2b2b2b'; $top = -64; break;
@@ -72,11 +72,7 @@ if (isset($_GET['uuid'])) {
 	if (empty($_GET['template'])) {
 		// read vm-template attribute
 		$strTemplateOS = $lv->_get_single_xpath_result($res, '//domain/metadata/*[local-name()=\'vmtemplate\']/@os');
-		$strLibreELEC = $lv->_get_single_xpath_result($res, '//domain/metadata/*[local-name()=\'vmtemplate\']/@libreelec');
-		$strOpenELEC = $lv->_get_single_xpath_result($res, '//domain/metadata/*[local-name()=\'vmtemplate\']/@openelec');
-		if ($strLibreELEC) $strSelectedTemplate = 'LibreELEC';
-		elseif ($strOpenELEC) $strSelectedTemplate = 'OpenELEC';
-		elseif ($strTemplateOS) {
+		if ($strTemplateOS) {
 			$strSelectedTemplate = $lv->_get_single_xpath_result($res, '//domain/metadata/*[local-name()=\'vmtemplate\']/@name');
 		} else {
 			// legacy VM support for <6.2 but need it going forward too
@@ -105,11 +101,25 @@ if (strpos($strSelectedTemplate,"User-") !== false) {
 <link type="text/css" rel="stylesheet" href="<?autov('/plugins/dynamix.vm.manager/styles/dynamix.vm.manager.css')?>">
 <link type="text/css" rel="stylesheet" href="<?autov('/plugins/dynamix.vm.manager/styles/edit.css')?>">
 
-<span class="status advancedview_panel" style="margin-top:<?=$top?>px;"><input type="checkbox" class="inlineview"><input type="checkbox" class="advancedview"></span>
 <div class="domain">
 	<form id="vmform" method="POST">
 	<input type="hidden" name="domain[type]" value="kvm" />
 	<input type="hidden" name="template[name]" value="<?=htmlspecialchars($strSelectedTemplateUT)?>" />
+	<input type="hidden" name="template[iconold]" value="<?=htmlspecialchars($arrLoad['icon'])?>" />
+
+	<table>
+		<tbody>
+			<tr>
+				<td>&nbsp;</td>
+				<td>
+					<span class="status advancedview_panel">
+						<input type="checkbox" class="inlineview">
+						<input type="checkbox" class="advancedview">
+					</span>
+				</td>
+			</tr>
+		</tbody>
+	</table>
 
 	<table>
 		<tr>

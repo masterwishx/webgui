@@ -33,6 +33,10 @@ $_SERVER['REQUEST_URI'] = 'settings';
 require_once "$docroot/webGui/include/Translations.php";
 require_once "$docroot/webGui/include/Helpers.php";
 
+function escapeSSID($text) {
+  return str_replace('"', '\"', $text);
+}
+
 function scanWifi($port) {
   $wlan = [];
   exec("iw ".escapeshellarg($port)." scan | grep -P '^BSS|freq:|signal:|SSID:|Authentication suites:' | sed -r ':a;N;\$!ba;s/\\n\\s+/ /g'", $scan);
@@ -84,7 +88,13 @@ case 'list':
   $title = _('Connect to WiFi network');
   $port  = array_key_first($wifi);
   $carrier = "/sys/class/net/$port/carrier";
-  $echo  = $wlan = [];
+  $echo  = [
+    'active' => ['heading' => _('Connected'), 'empty' => _('None'), 'items' => []],
+    'saved'  => ['heading' => _('My networks'), 'empty' => _('None'), 'items' => []],
+    'other'  => ['heading' => _('Other networks'), 'empty' => _('None'), 'items' => [], 'visible' => !$load],
+    'port'   => $port
+  ];
+  $wlan = [];
   foreach ($wifi as $network => $block) {
     if ($network == $port) continue;
     $wlan[$network][0] = $block['ATTR1'] ?? '';
@@ -103,6 +113,7 @@ case 'list':
     $alive = $up ? exec("iw ".escapeshellarg($port)." link 2>/dev/null | grep -Pom1 'SSID: \K.+'") : '';
     $state = $up ? _('Connected') : _('Disconnected');
     $color = $up ? 'blue' : 'red';
+    $echo['active']['heading'] = $state;
 
     foreach ($wlan as $network => $block) {
       $attr[$network]['ATTR1'] = $block[0] ?? '';
@@ -111,23 +122,31 @@ case 'list':
       $attr[$network]['ATTR4'] = $block[1] ?? '';
       if (isset($wifi[$network]['GROUP'])) {
         if ($network == $alive || $wifi[$network]['GROUP'] == 'active') {
-          $echo['active'][] = "<dl><dt>$state:</dt>";
-          $echo['active'][] = "<dd><span class=\"wifi\">$network</span><i class=\"fa fa-fw fa-wifi hand $color-text\" onclick=\"manage_wifi(encodeURIComponent('$network'),1)\" title=\"$title\"></i><input type=\"button\" class=\"form\" value=\""._('Info')."\" onclick=\"networkInfo('$port')\"></dd>";
+          $echo['active']['items'][] = [
+            'network' => $network,
+            'task' => 1,
+            'color' => $color,
+            'title' => $title,
+            'info' => true,
+            'infoLabel' => _('Info')
+          ];
         } else {
-          $echo['saved'][] = empty($echo['saved']) ? "<dl><dt>"._('My networks').":</dt>" : "<dt>&nbsp;</dt>";
-          $echo['saved'][] = "<dd><span class=\"wifi\">$network</span><i class=\"fa fa-wifi hand blue-text\" onclick=\"manage_wifi(encodeURIComponent('$network'),1)\" title=\"$title\"></i></dd>";
+          $echo['saved']['items'][] = [
+            'network' => $network,
+            'task' => 1,
+            'color' => 'blue',
+            'title' => $title
+          ];
         }
       } else {
-        $echo['other'][] = empty($echo['other']) ? "<dl><dt>"._('Other networks').":</dt>" : "<dt>&nbsp;</dt>";
-        $echo['other'][] = "<dd><span class=\"wifi\">$network</span><i class=\"fa fa-wifi hand grey-text\" onclick=\"manage_wifi(encodeURIComponent('$network'),0)\" title=\"$title\"></i></dd>";
+        $echo['other']['items'][] = [
+          'network' => $network,
+          'task' => 0,
+          'color' => 'grey',
+          'title' => $title
+        ];
       }
     }
-    if (empty($echo['active'])) $echo['active'][] = "<dl><dt>"._('Connected').":</dt><dd>"._('None')."</dd>";
-    if (empty($echo['saved'])) $echo['saved'][] = "<dl><dt>"._('My networks').":</dt><dd>"._('None')."</dd>";
-    if (empty($echo['other'])) $echo['other'][] = $load ? "" : "<dl><dt>"._('Other networks').":</dt><dd>"._('None')."</dd>";
-    $echo['active'] = implode($echo['active']);
-    $echo['saved'] = implode($echo['saved']);
-    $echo['other'] = implode($echo['other']);
     saveAttr();
   }
   echo json_encode($echo);
@@ -135,7 +154,7 @@ case 'list':
 case 'join':
   if (is_readable($ssl)) extract(parse_ini_file($ssl));
   $token   = parse_ini_file($var)['csrf_token'];
-  $ssid    = rawurldecode($_POST['ssid']);
+  $ssid    = escapeSSID(rawurldecode($_POST['ssid']));
   $drop    = $_POST['task'] == 1;
   $manual  = $_POST['task'] == 3;
   $user    = _var($wifi[$ssid],'USERNAME') && isset($cipher, $key, $iv) ? openssl_decrypt($wifi[$ssid]['USERNAME'], $cipher, $key, 0, $iv) : _var($wifi[$ssid],'USERNAME');
@@ -161,7 +180,7 @@ case 'join':
   $ieee1   = strpos($attr3,'IEEE') !== false;
   $ieee2   = strpos($safe,'IEEE') !== false;
   $hide0   = ($manual || !$ieee2) && !$ieee1 && $safe != 'auto' ? 'hide' : '';
-  $hide1   = $safe == 'open' || $attr3 == 'open' || !$attr3 ? 'hide' : '';
+  $hide1   = !$manual && ($safe == 'open' || $attr3 == 'open' || !$attr3) ? 'hide' : '';
   $hide2   = $dhcp4 == 'no' ? '' : 'hide';
   $hide3   = $dns4 == 'no' ? 'hide' : '';
   $hide4   = $dhcp6 == 'no' ? '' : 'hide';
@@ -195,41 +214,41 @@ case 'join':
     echo mk_option($safe, 'IEEE 802.1X/SHA-256', _('WPA3 Enterprise'));
     echo "</select></td></tr>";
   }
-  if ($ieee1 || $manual || $safe) echo "<tr id=\"username\" class=\"$hide0\"><td>"._('Username').":</td><td><input type=\"text\" name=\"USERNAME\" class=\"narrow\" maxlength=\"63\" value=\"$user\"></td></tr>";
-  if ($attr3 || $manual || $safe) echo "<tr id=\"password\" class=\"$hide1\"><td>"._('Password').":</td><td><input type=\"password\" name=\"PASSWORD\" class=\"narrow\" maxlength=\"63\" value=\"$passwd\"><i id=\"showPass\" class=\"fa fa-eye\" onclick=\"showPassword()\"></i></td></tr>";
+  if ($ieee1 || $manual || $safe) echo "<tr id=\"username\" class=\"$hide0\"><td>"._('Username').":</td><td><input type=\"text\" name=\"USERNAME\" class=\"narrow swal-input-show\" maxlength=\"63\" value=\"$user\"></td></tr>";
+  if ($attr3 || $manual || $safe) echo "<tr id=\"password\" class=\"$hide1\"><td>"._('Password').":</td><td><input type=\"password\" name=\"PASSWORD\" class=\"narrow swal-input-show\" maxlength=\"63\" value=\"$passwd\"><i id=\"showPass\" class=\"fa fa-eye\" onclick=\"showPassword()\"></i></td></tr>";
   echo "<tr><td colspan=\"2\">&nbsp;</td></tr>";
   echo "<tr><td>"._('IPv4 address assignment').":</td><td><select name=\"DHCP4\" onclick=\"showDHCP(this.value,4)\">";
   echo mk_option($dhcp4, 'yes', _('Automatic'));
   echo mk_option($dhcp4, 'no', _('Static'));
   echo "</select></td></tr>";
-  echo "<tr class=\"static4 $hide2\"><td>"._('IPv4 address').":</td><td><input type=\"text\" name=\"IP4\" class=\"narrow\" maxlength=\"15\" value=\"$ip4\">/<select name=\"MASK4\" class=\"slim\">";
+  echo "<tr class=\"static4 $hide2\"><td>"._('IPv4 address').":</td><td><input type=\"text\" name=\"IP4\" class=\"narrow swal-input-show\" maxlength=\"15\" value=\"$ip4\">/<select name=\"MASK4\" class=\"slim\">";
   foreach ($masks as $mask => $prefix) echo mk_option($mask4, $mask, $prefix);
   echo "</select></td></tr>";
-  echo "<tr class=\"static4 $hide2\"><td>"._('IPv4 default gateway').":</td><td><input type=\"text\" name=\"GATEWAY4\" class=\"narrow\" maxlength=\"15\" value=\"$gw4\"></td></tr>";
+  echo "<tr class=\"static4 $hide2\"><td>"._('IPv4 default gateway').":</td><td><input type=\"text\" name=\"GATEWAY4\" class=\"narrow swal-input-show\" maxlength=\"15\" value=\"$gw4\"></td></tr>";
   echo "<tr class=\"dns4\"><td>"._('IPv4 DNS assignment').":</td><td><select name=\"DNS4\" onclick=\"showDNS(this.value,4)\">";
   echo mk_option($dns4, "no", _("Automatic"));
   echo mk_option($dns4, "yes", _("Static"));
   echo "</select></td></tr>";
-  echo "<tr class=\"server4 $hide3\"><td>"._('DNSv4 server').":</td><td><input type=\"text\" name=\"SERVER4\" class=\"narrow\" value=\"$server4\"></td></tr>";
+  echo "<tr class=\"server4 $hide3\"><td>"._('DNSv4 server').":</td><td><input type=\"text\" name=\"SERVER4\" class=\"narrow swal-input-show\" value=\"$server4\"></td></tr>";
   echo "<tr><td colspan=\"2\">&nbsp;</td></tr>";
   echo "<tr><td>"._('IPv6 address assignment').":</td><td><select name=\"DHCP6\" onclick=\"showDHCP(this.value,6)\">";
   echo mk_option($dhcp6, '', _('None'));
   echo mk_option($dhcp6, 'yes', _('Automatic'));
   echo mk_option($dhcp6, 'no', _('Static'));
   echo "</select></td></tr>";
-  echo "<tr class=\"static6 $hide4\"><td>"._('IPv6 address').":</td><td><input type=\"text\" name=\"IP6\" class=\"narrow\" maxlength=\"39\" value=\"$ip6\">/<input type=\"number\" min=\"1\" max=\"128\" maxlength=\"3\" name=\"MASK6\" class=\"slim\" value=\"$mask6\"></td></tr>";
-  echo "<tr class=\"static6 $hide4\"><td>"._('IPv6 default gateway').":</td><td><input type=\"text\" name=\"GATEWAY6\" class=\"narrow\" maxlength=\"39\" value=\"$gw6\"></td></tr>";
+  echo "<tr class=\"static6 $hide4\"><td>"._('IPv6 address').":</td><td><input type=\"text\" name=\"IP6\" class=\"narrow swal-input-show\" maxlength=\"39\" value=\"$ip6\">/<input type=\"number\" min=\"1\" max=\"128\" maxlength=\"3\" name=\"MASK6\" class=\"slim\" value=\"$mask6\"></td></tr>";
+  echo "<tr class=\"static6 $hide4\"><td>"._('IPv6 default gateway').":</td><td><input type=\"text\" name=\"GATEWAY6\" class=\"narrow swal-input-show\" maxlength=\"39\" value=\"$gw6\"></td></tr>";
   echo "<tr class=\"dns6 $hide5\"><td>"._('IPv6 DNS assignment').":</td><td><select name=\"DNS6\" onclick=\"showDNS(this.value,6)\">";
   echo mk_option($dns6, "no", _("Automatic"));
   echo mk_option($dns6, "yes", _("Static"));
   echo "</select></td></tr>";
-  echo "<tr class=\"server6 $hide6\"><td>"._('DNSv6 server').":</td><td><input type=\"text\" name=\"SERVER6\" class=\"narrow\" value=\"$server6\"></td></tr>";
+  echo "<tr class=\"server6 $hide6\"><td>"._('DNSv6 server').":</td><td><input type=\"text\" name=\"SERVER6\" class=\"narrow swal-input-show\" value=\"$server6\"></td></tr>";
   echo "<tr><td colspan=\"2\">&nbsp;</td></tr>";
   echo "</table>";
   echo "</form>";
   break;
 case 'forget':
-  $ssid = rawurldecode($_POST['ssid']);
+  $ssid = escapeSSID(rawurldecode($_POST['ssid']));
   if ($wifi[$ssid]['GROUP'] == 'active') exec("/etc/rc.d/rc.wireless stop &>/dev/null &");
   unset($wifi[$ssid]);
   saveWifi();

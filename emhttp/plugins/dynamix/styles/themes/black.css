@@ -40,13 +40,14 @@
     --small-shadow: 0 0 3px var(--gray-700); 
     --hr-color: var(--gray-800); 
 
-    --checkbox-color: var(--gray-800); 
+    --checkbox-color: var(--gray-500); 
     --checkbox-hover-color: var(--gray-600); 
 
     --brand-orange: var(--orange-500);
     --brand-red: var(--red-800);
 
-    --header-color: var(--gray-100);
+    --header-text-color: var(--customer-header-text-color, var(--inverse-text-color));
+    --header-background-color: var(--custom-header-background-color, var(--gray-100));
 
     --title-header-background-color: var(--mild-background-color);
 

@@ -15,7 +15,7 @@ jobs:
       # Sync the fork's branch with the upstream repository.
       # Replace "main" with your default branch (e.g. "master").
       # Fails if the fork has commits that upstream doesn't (needs merge/rebase).
-      - run: gh repo sync ${{ github.repository }} --branch main
+      - run: gh repo sync ${{ github.repository }} --branch master
         env:
           # If upstream changes files in .github/workflows, replace this with
           # a personal access token (scope: workflow) stored as a repo secret.
